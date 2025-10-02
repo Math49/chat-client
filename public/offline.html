@@ -1,38 +1,75 @@
-<!-- public/offline.html -->
+﻿<!-- public/offline.html -->
 <!doctype html>
 <html lang="fr">
   <head>
     <meta charset="utf-8" />
-    <title>Hors ligne — Chat Client</title>
+    <title>Hors ligne - Chat Client</title>
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <style>
       :root { color-scheme: light dark; }
       body {
-        margin: 0; font: 16px/1.5 system-ui, -apple-system, sans-serif;
-        display: grid; min-height: 100dvh; place-items: center; padding: 24px;
+        margin: 0;
+        font: 16px/1.5 system-ui, -apple-system, sans-serif;
+        display: grid;
+        min-height: 100dvh;
+        place-items: center;
+        padding: 24px;
+        background: Canvas;
+        color: CanvasText;
       }
       .card {
-        max-width: 560px; width: 100%;
+        max-width: 560px;
+        width: 100%;
         border: 1px solid color-mix(in srgb, CanvasText 12%, Canvas 88%);
-        border-radius: 16px; padding: 24px;
+        border-radius: 16px;
+        padding: 24px;
+        background: color-mix(in srgb, Canvas 94%, CanvasText 6%);
+        box-shadow: 0 12px 30px color-mix(in srgb, CanvasText 12%, transparent);
       }
-      h1 { margin: 0 0 8px; font-size: 22px; }
-      p { margin: 0 0 12px; opacity: .8; }
-      code { background: color-mix(in srgb, CanvasText 8%, Canvas 92%); padding: 2px 6px; border-radius: 6px; }
-      ul { margin: 0; padding-left: 18px; }
+      h1 { margin: 0 0 12px; font-size: 24px; }
+      p { margin: 0 0 12px; opacity: .85; }
+      ul { margin: 12px 0; padding-left: 18px; }
+      a {
+        color: inherit;
+        text-decoration: underline;
+      }
+      footer {
+        margin-top: 18px;
+        font-size: 13px;
+        opacity: .7;
+      }
+      button, a.button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        padding: 10px 18px;
+        border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas 80%);
+        background: color-mix(in srgb, Canvas 92%, CanvasText 8%);
+        color: inherit;
+        text-decoration: none;
+      }
+      .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
     </style>
   </head>
   <body>
     <main class="card" role="main">
-      <h1>Vous êtes hors ligne</h1>
-      <p>Certains contenus restent disponibles :</p>
+      <h1>Mode hors ligne</h1>
+      <p>Pas de connexion pour le moment. Les pages deja ouvertes restent disponibles&nbsp;:</p>
       <ul>
-        <li>Votre profil (dernière version locale)</li>
-        <li>Conversations déjà consultées</li>
-        <li>Pièces jointes déjà vues</li>
+        <li>Camera pour capturer des photos (elles restent stockees localement).</li>
+        <li>Galerie avec toutes les photos sauvegardees sur l'appareil.</li>
+        <li>Conversations ou contenus consultes recemment.</li>
       </ul>
-      <p>Les actions seront <strong>envoyées automatiquement</strong> dès le retour du réseau.</p>
-      <p style="margin-top:12px">Astuce : ouvrez vos conversations importantes au moins une fois pour les consulter hors ligne.</p>
+      <p>Les actions hors ligne (prise de photo, suppression) sont appliquees sur l'appareil et resteront en attente jusqu'au retour du reseau si necessaire.</p>
+      <div class="actions">
+        <a class="button" href="/camera">Revenir a la camera</a>
+        <a class="button" href="/gallery">Aller a la galerie</a>
+      </div>
+      <footer>
+        Astuce&nbsp;: installe l'application comme PWA pour un acces direct depuis l'ecran d'accueil.
+      </footer>
     </main>
   </body>
 </html>
+

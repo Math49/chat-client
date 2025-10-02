@@ -14,17 +14,26 @@ workbox.core.setCacheNameDetails({
 const DEBUG = false;
 if (DEBUG) workbox.setConfig({ debug: true });
 
+const APP_SHELL_CACHE = 'chat-client-app-shell';
+const APP_SHELL_ASSETS = [
+  '/',
+  '/camera',
+  '/gallery',
+  '/offline.html',
+  '/images/icons/Logo-192x192.png',
+  '/images/icons/Logo-512x512.png',
+  '/manifest.json',
+];
+
 /* ---------------
    Pré-chargement minimal (fallback + icônes)
    --------------- */
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open('chat-client-app-shell').then((cache) =>
-      cache.addAll([
-        '/offline.html',
-        '/images/icons/Logo-192x192.png',
-        '/images/icons/Logo-512x512.png',
-      ])
+    caches.open(APP_SHELL_CACHE).then((cache) =>
+      cache.addAll(APP_SHELL_ASSETS).catch((error) => {
+        if (DEBUG) console.warn('[SW] pre-cache error', error);
+      })
     )
   );
 });
@@ -242,6 +251,23 @@ workbox.routing.setDefaultHandler(
 /* ---------------
    Gestion des mises à jour (skipWaiting sur demande)
    --------------- */
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const targetUrl = event.notification?.data?.url || '/gallery';
+
+  event.waitUntil((async () => {
+    const windowClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of windowClients) {
+      if ('focus' in client && client.url.includes(targetUrl)) {
+        return client.focus();
+      }
+    }
+    if (clients.openWindow) {
+      await clients.openWindow(targetUrl);
+    }
+  })());
+});
+
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
