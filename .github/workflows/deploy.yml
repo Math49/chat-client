@@ -1,12 +1,10 @@
 name: 🚀 Deploy Chat Client
 
-on:
+on: 
   push:
-    branches: [ master ]
+    branches:
+      - master
 
-concurrency:
-  group: deploy-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   deploy:
