@@ -1,0 +1,38 @@
+<!-- public/offline.html -->
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Hors ligne — Chat Client</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0; font: 16px/1.5 system-ui, -apple-system, sans-serif;
+        display: grid; min-height: 100dvh; place-items: center; padding: 24px;
+      }
+      .card {
+        max-width: 560px; width: 100%;
+        border: 1px solid color-mix(in srgb, CanvasText 12%, Canvas 88%);
+        border-radius: 16px; padding: 24px;
+      }
+      h1 { margin: 0 0 8px; font-size: 22px; }
+      p { margin: 0 0 12px; opacity: .8; }
+      code { background: color-mix(in srgb, CanvasText 8%, Canvas 92%); padding: 2px 6px; border-radius: 6px; }
+      ul { margin: 0; padding-left: 18px; }
+    </style>
+  </head>
+  <body>
+    <main class="card" role="main">
+      <h1>Vous êtes hors ligne</h1>
+      <p>Certains contenus restent disponibles :</p>
+      <ul>
+        <li>Votre profil (dernière version locale)</li>
+        <li>Conversations déjà consultées</li>
+        <li>Pièces jointes déjà vues</li>
+      </ul>
+      <p>Les actions seront <strong>envoyées automatiquement</strong> dès le retour du réseau.</p>
+      <p style="margin-top:12px">Astuce : ouvrez vos conversations importantes au moins une fois pour les consulter hors ligne.</p>
+    </main>
+  </body>
+</html>
