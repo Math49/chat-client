@@ -2,14 +2,14 @@ import { createServer } from 'http'
 import { parse } from 'url'
 import next from 'next'
  
-const port = 3000
+const port = 3001
 const dev = false
 const app = next({ dev })
 const handle = app.getRequestHandler()
  
 app.prepare().then(() => {
   createServer((req, res) => {
-    const parsedUrl = parse(req.url!, true)
+    const parsedUrl = parse(req.url, true)
     handle(req, res, parsedUrl)
   }).listen(port)
  
