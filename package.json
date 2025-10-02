@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node server.js",
     "build": "next build",
-    "start": "$env:NODE_ENV='production'; node server.js"
+    "start": "set NODE_ENV='production'; node server.js"
   },
   "dependencies": {
     "@heroui/react": "^2.8.4",
