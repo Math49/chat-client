@@ -2,10 +2,11 @@
   "name": "chat-client",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "dev": "next dev",
+    "dev": "node server.js",
     "build": "next build",
-    "start": "next start -p 3002"
+    "start": "$env:NODE_ENV='production'; node server.js"
   },
   "dependencies": {
     "@heroui/react": "^2.8.4",
