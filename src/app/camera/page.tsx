@@ -119,8 +119,8 @@ export default function CameraPage() {
   }, []);
 
   return (
-    <div className="flex flex-col gap-4 p-4">
-      <div className="flex items-center justify-between">
+    <div className="flex flex-col items-center gap-4 p-4">
+      <div className="flex items-center w-full justify-between">
         <h2 className="text-xl font-semibold">Camera</h2>
         <nav className="flex gap-2 text-sm">
           <Link className="underline" href="/gallery">
@@ -132,7 +132,7 @@ export default function CameraPage() {
         </nav>
       </div>
 
-      <div className="relative aspect-[3/4] w-full overflow-hidden rounded-lg bg-black">
+      <div className="relative flex justify-center aspect-[4/3] w-[70%] overflow-hidden rounded-lg bg-black">
         <video
           ref={videoRef}
           className="h-full w-full object-cover"
