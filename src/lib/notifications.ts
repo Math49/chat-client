@@ -17,9 +17,26 @@ interface NotifyOptions {
   title?: string;
   body?: string;
   icon?: string;
+  url?: string;
+  vibrate?: number | number[] | false;
+  tag?: string;
 }
 
-export const showNotification = async ({ title = "Notification", body, icon }: NotifyOptions): Promise<boolean> => {
+const resolveVibrationPattern = (value?: number | number[] | false): number[] | undefined => {
+  if (value === false) return undefined;
+  if (Array.isArray(value)) return value;
+  if (typeof value === "number") return [value];
+  return [160, 80, 160];
+};
+
+export const showNotification = async ({
+  title = "Notification",
+  body,
+  icon,
+  url = "/gallery",
+  vibrate,
+  tag,
+}: NotifyOptions): Promise<boolean> => {
   if (typeof window === "undefined") return false;
   if (typeof Notification === "undefined") return false;
   if (!("serviceWorker" in navigator)) return false;
@@ -30,15 +47,23 @@ export const showNotification = async ({ title = "Notification", body, icon }: N
 
   if (permission !== "granted") return false;
 
+  const pattern = resolveVibrationPattern(vibrate);
+
+  if (pattern && typeof navigator.vibrate === "function") {
+    navigator.vibrate(pattern);
+  }
+
   try {
     const registration = await navigator.serviceWorker.ready;
-    await registration.showNotification(title, {
+    const options: NotificationOptions & { vibrate?: number[] } = {
       body,
       icon,
       badge: icon,
-      data: { url: "/gallery" },
-      tag: "photo-saved",
-    });
+      vibrate: pattern,
+      data: { url },
+      tag: tag ?? `chat-client-${url}`,
+    };
+    await registration.showNotification(title, options);
     return true;
   } catch (error) {
     console.error("Unable to show notification", error);

@@ -17,6 +17,8 @@ if (DEBUG) workbox.setConfig({ debug: true });
 const APP_SHELL_CACHE = 'chat-client-app-shell';
 const APP_SHELL_ASSETS = [
   '/',
+  '/reception',
+  '/room/general',
   '/camera',
   '/gallery',
   '/offline.html',
