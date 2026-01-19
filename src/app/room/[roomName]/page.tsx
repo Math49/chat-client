@@ -372,7 +372,7 @@ export default function RoomPage() {
           <Divider />
           <CardBody className="flex h-full flex-col gap-3">
             <ScrollShadow className="flex-1 pr-2">
-              <div className="space-y-3">
+              <div className="space-y-3 max-h-[400px] overflow-y-auto px-1">
                 {messages.map((m) => (
                   <div
                     key={m.id}
