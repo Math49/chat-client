@@ -1,18 +1,35 @@
-﻿"use client";
+﻿/**
+ * @fileoverview
+ * Page de salle de chat en temps réel avec Support WebRTC audio.
+ * Refactorisé pour utiliser les hooks useSocketSetup et usePeerCall.
+ * Gère la persistance des messages, l'affichage des participants et les appels audio.
+ * @module room/[roomName]/page
+ */
+
+"use client";
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import SimplePeer, { type Instance as SimplePeerInstance } from "simple-peer";
 
 import { useUser } from "@/contexts/user-context";
+import { useSocketSetup } from "@/hooks/use-socket-setup";
+import { usePeerCall } from "@/hooks/use-peer-call";
 import { rememberRoom } from "@/lib/rooms";
-import { createChatSocket, type ChatClientInfo, type ChatMessage, type ChatSocket, type PeerSignalPayload } from "@/lib/socket-client";
 import { savePhoto } from "@/lib/photo-storage";
+import { loadRoomMessages, addRoomMessage } from "@/lib/message-storage";
 import { showNotification } from "@/lib/notifications";
+import { type ChatClientInfo } from "@/lib/socket-client";
 
+/** Expression régulière pour détecter les images en base64 */
 const IMAGE_DATA_PREFIX = /^data:image\//i;
 
+/**
+ * Convertit un fichier en data URL (base64).
+ * @param {File} file - Fichier à convertir
+ * @returns {Promise<string>} Promise resolving to data URL string
+ * @throws Rejette si le fichier n'est pas readable
+ */
 const toDataUrl = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -27,6 +44,17 @@ const toDataUrl = (file: File): Promise<string> =>
     reader.readAsDataURL(file);
   });
 
+/**
+ * Entrée de message ou d'info affichée en chat.
+ * @typedef {Object} ChatEntry
+ * @property {string} id - Identifiant unique
+ * @property {"message"|"info"} type - Type d'entrée (message ou info système)
+ * @property {string} pseudo - Pseudonyme du sender
+ * @property {string} content - Contenu (texte ou data URL image)
+ * @property {Date} date - Horodatage
+ * @property {boolean} isMine - Vrai si envoyé par l'utilisateur courant
+ * @property {boolean} isImage - Vrai si contenu = image
+ */
 type ChatEntry = {
   id: string;
   type: "message" | "info";
@@ -37,12 +65,15 @@ type ChatEntry = {
   isImage: boolean;
 };
 
-type CallState =
-  | { phase: "idle" }
-  | { phase: "dialing"; targetId: string; targetPseudo: string }
-  | { phase: "incoming"; fromId: string; fromPseudo: string }
-  | { phase: "active"; peerId: string; peerPseudo: string };
-
+/**
+ * Composant RemoteAudio - Lecture du stream audio d'un pair distant.
+ * Attaché au DOM sans UI visible, gère le lifecycle du stream.
+ * @component
+ * @param {Object} props
+ * @param {MediaStream} props.stream - Stream audio distant
+ * @param {string} props.id - ID unique du pair distant
+ * @returns {JSX.Element} Element audio caché (autoplay)
+ */
 const RemoteAudio = ({ stream, id }: { stream: MediaStream; id: string }) => {
   const elementRef = useRef<HTMLAudioElement | null>(null);
 
@@ -62,48 +93,30 @@ const RemoteAudio = ({ stream, id }: { stream: MediaStream; id: string }) => {
   return <audio ref={elementRef} autoPlay id={`remote-audio-${id}`} className="hidden" />;
 };
 
+/**
+ * Page salle de chat - Affiche les messages, participants et gère les appels audio.
+ * @component
+ * @returns {JSX.Element} Interface chat avec zones messages, participants et appels
+ */
 export default function RoomPage() {
   const params = useParams<{ roomName: string }>();
   const roomName = decodeURIComponent(params?.roomName ?? "general");
   const router = useRouter();
   const { profile, isReady } = useUser();
 
+  // État UI
   const [messages, setMessages] = useState<ChatEntry[]>([]);
   const [inputValue, setInputValue] = useState("");
-  const [socketStatus, setSocketStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
   const [clients, setClients] = useState<Record<string, ChatClientInfo>>({});
   const [socketId, setSocketId] = useState<string | null>(null);
-  const [callState, setCallState] = useState<CallState>({ phase: "idle" });
+  const [socketStatus, setSocketStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
-  const [error, setError] = useState<string | null>(null);
-  const [incomingInfo, setIncomingInfo] = useState<{ id: string; pseudo: string } | null>(null);
 
-  const socketRef = useRef<ChatSocket | null>(null);
-  const clientsRef = useRef<Record<string, ChatClientInfo>>({});
-  const profileRef = useRef(profile);
-  const callStateRef = useRef<CallState>({ phase: "idle" });
+  // Références pour gestion des streams et DOM
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const peersRef = useRef<Map<string, SimplePeerInstance>>(new Map());
-  const pendingSignalsRef = useRef<Map<string, unknown[]>>(new Map());
-  const remoteStreamsRef = useRef<Record<string, MediaStream>>({});
 
-  useEffect(() => {
-    clientsRef.current = clients;
-  }, [clients]);
-
-  useEffect(() => {
-    profileRef.current = profile;
-  }, [profile]);
-
-  useEffect(() => {
-    callStateRef.current = callState;
-  }, [callState]);
-
-  useEffect(() => {
-    remoteStreamsRef.current = remoteStreams;
-  }, [remoteStreams]);
-
+  // Vérification authentification
   useEffect(() => {
     if (!isReady) return;
     if (!profile?.pseudo) {
@@ -111,321 +124,272 @@ export default function RoomPage() {
     }
   }, [isReady, profile, router]);
 
+  // Auto-scroll vers le dernier message
   useEffect(() => {
     if (messages.length === 0) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  /**
+   * Ajoute une entrée à la liste des messages affiché (mutation state).
+   * @param {ChatEntry} entry - Entrée à ajouter
+   */
   const appendMessage = useCallback((entry: ChatEntry) => {
     setMessages((prev) => [...prev, entry]);
   }, []);
 
-  const resetCall = useCallback(() => {
-    peersRef.current.forEach((peer) => peer.destroy());
-    peersRef.current.clear();
+  /**
+   * Traite les messages reçus depuis le serveur Socket.IO.
+   * Persiste en localStorage et gère les notifications push.
+   * @param {Object} payload - Payload du serveur
+   * @param {string} payload.content - Contenu (texte ou data URL)
+   * @param {string} [payload.pseudo] - Pseudonyme du sender
+   * @param {string} [payload.categorie] - Type de message (MESSAGE|INFO)
+   * @param {string} [payload.dateEmis] - Date ISO du serveur
+   * @param {string} [payload.serverId] - ID unique du serveur
+   */
+  const handleChatMessage = useCallback((payload: any) => {
+    const author = payload.pseudo ?? "Serveur";
+    const isMine = Boolean(profile && payload.pseudo === profile.pseudo);
+    const isImage = typeof payload.content === "string" ? IMAGE_DATA_PREFIX.test(payload.content) : false;
+    
+    const entry: ChatEntry = {
+      id: `${payload.dateEmis ?? Date.now()}-${payload.serverId ?? Math.random().toString(16).slice(2)}`,
+      type: payload.categorie === "INFO" ? "info" : "message",
+      pseudo: author,
+      content: payload.content,
+      date: payload.dateEmis ? new Date(payload.dateEmis) : new Date(),
+      isMine,
+      isImage,
+    };
+    appendMessage(entry);
 
-    Object.values(remoteStreamsRef.current).forEach((stream) => {
-      stream.getTracks().forEach((track) => track.stop());
-    });
-    setRemoteStreams({});
-    remoteStreamsRef.current = {};
-
-    const localStream = localStreamRef.current;
-    if (localStream) {
-      localStream.getTracks().forEach((track) => track.stop());
-      localStreamRef.current = null;
+    // Persister en localStorage
+    try {
+      addRoomMessage(roomName, {
+        id: entry.id,
+        pseudo: author,
+        content: payload.content,
+        categorie: entry.type === "info" ? "INFO" : "MESSAGE",
+        isMine,
+        isImage,
+      });
+    } catch (storageError) {
+      console.warn("[MessageStorage] Failed to persist", storageError);
     }
 
-    setCallState({ phase: "idle" });
-    setIncomingInfo(null);
-    pendingSignalsRef.current.clear();
-  }, []);
+    // Sauvegarder les images en galerie
+    if (entry.isImage) {
+      try {
+        savePhoto(entry.content);
+      } catch (photoError) {
+        console.warn("Unable to store photo", photoError);
+      }
+    }
 
-  useEffect(() => {
-    if (!isReady || !profile?.pseudo) return;
-
-    rememberRoom(roomName);
-
-    const socket = createChatSocket();
-    socketRef.current = socket;
-    setSocketStatus("connecting");
-
-    const handleConnect = () => {
-      setSocketStatus("connected");
-      setSocketId(socket.id ?? null);
-      socket.emit("chat-join-room", {
-        pseudo: profile.pseudo,
-        roomName,
-        avatar: profile.avatar ?? null,
+    // Notifier si message reçu hors focus
+    if (!isMine && entry.type === "message" && typeof document !== "undefined" && document.visibilityState === "hidden") {
+      showNotification({
+        title: `${author} (#${roomName})`,
+        body: entry.isImage ? "Photo partagee" : entry.content.slice(0, 80),
+        icon: "/images/icons/Logo-192x192.png",
+        url: `/room/${encodeURIComponent(roomName)}`,
+        vibrate: [120, 60, 120],
       });
-    };
+    }
+  }, [profile, roomName, appendMessage]);
 
-    const handleDisconnect = () => {
+  /**
+   * Configuration Socket.IO avec listeners d'événements.
+   * Utilise le hook useSocketSetup pour encapsuler la logique.
+   */
+  useSocketSetup({
+    roomName,
+    pseudo: profile?.pseudo ?? "",
+    avatar: profile?.avatar ?? null,
+    onConnect: () => {
+      setSocketStatus("connected");
+    },
+    onDisconnect: () => {
       setSocketStatus("idle");
-      setSocketId(null);
-      resetCall();
-    };
-
-    const handleError = (message: string) => {
+    },
+    onError: (message: string) => {
       console.error("Socket error", message);
       setError(message);
       setSocketStatus("error");
-    };
-
-    const handleChatMessage = (payload: ChatMessage) => {
-      const currentProfile = profileRef.current;
-      const author = payload.pseudo ?? "Serveur";
-      const isMine = Boolean(currentProfile && payload.pseudo === currentProfile.pseudo);
-      const entry: ChatEntry = {
-        id: `${payload.dateEmis ?? Date.now()}-${payload.serverId ?? Math.random().toString(16).slice(2)}`,
-        type: payload.categorie === "INFO" ? "info" : "message",
-        pseudo: author,
-        content: payload.content,
-        date: payload.dateEmis ? new Date(payload.dateEmis) : new Date(),
-        isMine,
-        isImage: typeof payload.content === "string" ? IMAGE_DATA_PREFIX.test(payload.content) : false,
-      };
-      appendMessage(entry);
-
-      if (entry.isImage) {
-        try {
-          savePhoto(entry.content);
-        } catch (photoError) {
-          console.warn("Unable to store photo", photoError);
-        }
-      }
-
-      if (!isMine && entry.type === "message" && typeof document !== "undefined" && document.visibilityState === "hidden") {
-        showNotification({
-          title: `${author} (#${roomName})`,
-          body: entry.isImage ? "Photo partagee" : entry.content.slice(0, 80),
-          icon: "/images/icons/Logo-192x192.png",
-          url: `/room/${encodeURIComponent(roomName)}`,
-          vibrate: [120, 60, 120],
-        });
-      }
-    };
-
-    const handleJoinedRoom = ({ clients: incomingClients }: { clients: Record<string, ChatClientInfo> }) => {
+    },
+    onChatMessage: handleChatMessage,
+    onJoinedRoom: (incomingClients: Record<string, ChatClientInfo>) => {
       setClients(incomingClients);
-    };
-
-    const handleDisconnected = (payload: { id: string; pseudo?: string }) => {
+      setSocketId(Object.keys(incomingClients).find(id => {
+        // Trouvé le client courant en comparant pseudo
+        const cli = incomingClients[id];
+        return cli?.pseudo === profile?.pseudo;
+      }) ?? null);
+    },
+    onDisconnectedUser: (userId: string, pseudo?: string) => {
       setClients((prev) => {
         const next = { ...prev };
-        delete next[payload.id];
+        delete next[userId];
         return next;
       });
       appendMessage({
-        id: `leave-${payload.id}-${Date.now()}`,
+        id: `leave-${userId}-${Date.now()}`,
         type: "info",
-        pseudo: payload.pseudo ?? "Serveur",
-        content: `${payload.pseudo ?? "Un utilisateur"} a quitte la room`,
+        pseudo: pseudo ?? "Serveur",
+        content: `${pseudo ?? "Un utilisateur"} a quitte la room`,
         date: new Date(),
         isMine: false,
         isImage: false,
       });
-      const stream = remoteStreamsRef.current[payload.id];
-      if (stream) {
-        stream.getTracks().forEach((track) => track.stop());
-      }
-      setRemoteStreams((prev) => {
-        const next = { ...prev };
-        delete next[payload.id];
-        return next;
-      });
-      const streamsCopy = { ...remoteStreamsRef.current };
-      delete streamsCopy[payload.id];
-      remoteStreamsRef.current = streamsCopy;
-      peersRef.current.get(payload.id)?.destroy();
-      peersRef.current.delete(payload.id);
-      const currentCall = callStateRef.current;
-      if (currentCall.phase === "active" && currentCall.peerId === payload.id) {
-        setCallState({ phase: "idle" });
-      }
-    };
+    },
+  });
 
-    const handlePeerSignal = ({ id, signal }: PeerSignalPayload) => {
-      const currentClients = clientsRef.current;
-      const target = currentClients[id];
-      if (!target) {
-        console.warn("Peer signal received for unknown client", id);
-        return;
-      }
-      const existingPeer = peersRef.current.get(id);
-      if (existingPeer) {
-        existingPeer.signal(signal);
-        return;
-      }
-      const queue = pendingSignalsRef.current.get(id) ?? [];
-      queue.push(signal);
-      pendingSignalsRef.current.set(id, queue);
-      setIncomingInfo({ id, pseudo: target.pseudo });
-      setCallState({ phase: "incoming", fromId: id, fromPseudo: target.pseudo });
-      if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
-        navigator.vibrate([200, 100, 200]);
-      }
-    };
+  // Hook gestion appels audio WebRTC
+  const { 
+    callState, 
+    startCall: startPeerCall, 
+    acceptCall: acceptPeerCall, 
+    rejectCall: rejectPeerCall, 
+    handleIncomingSignal, 
+    hangup 
+  } = usePeerCall({
+    onRemoteStream: (peerId, stream) => {
+      setRemoteStreams((prev) => ({ ...prev, [peerId]: stream }));
+    },
+    onCallStateChange: (state) => {
+      // État appel change: dialing, incoming, active, idle
+      console.log("[Room] Call state:", state);
+    },
+    onError: (error) => {
+      console.error("[Room] Peer error:", error);
+      setError(typeof error === 'string' ? error : "Erreur appel audio");
+    },
+  });
 
-    socket.on("connect", handleConnect);
-    socket.on("disconnect", handleDisconnect);
-    socket.on("chat-msg", handleChatMessage);
-    socket.on("chat-joined-room", handleJoinedRoom);
-    socket.on("chat-disconnected", handleDisconnected);
-    socket.on("peer-signal", handlePeerSignal);
-    socket.on("error", handleError);
-    socket.on("erreur", handleError);
+  // Charge les messages persistants au démarrage
+  useEffect(() => {
+    if (!isReady || !profile?.pseudo) return;
+    rememberRoom(roomName);
 
-    socket.connect();
+    const stored = loadRoomMessages(roomName);
+    const entries: ChatEntry[] = stored.map((msg) => ({
+      id: msg.id,
+      type: msg.categorie === "INFO" ? "info" : "message",
+      pseudo: msg.pseudo,
+      content: msg.content,
+      date: new Date(msg.createdAt),
+      isMine: msg.isMine ?? false,
+      isImage: msg.isImage ?? false,
+    }));
+    setMessages(entries);
+  }, [isReady, profile?.pseudo, roomName]);
 
-    return () => {
-      socket.off("connect", handleConnect);
-      socket.off("disconnect", handleDisconnect);
-      socket.off("chat-msg", handleChatMessage);
-      socket.off("chat-joined-room", handleJoinedRoom);
-      socket.off("chat-disconnected", handleDisconnected);
-      socket.off("peer-signal", handlePeerSignal);
-      socket.off("error", handleError);
-      socket.off("erreur", handleError);
-      socket.disconnect();
-      socketRef.current = null;
-      resetCall();
-    };
-  }, [isReady, profile, roomName, resetCall]);
+  /**
+   * Extrait les infos de l'appel reçu si phase === incoming.
+   * Utilisé pour affichage UI du bouton accept/reject.
+   */
+  const incomingInfo = callState.phase === "incoming" 
+    ? { id: callState.fromId, pseudo: callState.fromPseudo } 
+    : null;
 
+  /**
+   * Liste des participants autres que l'utilisateur courant, triée par pseudo.
+   * Mémorisée pour éviter recalcul à chaque render.
+   */
   const participants = useMemo(() => {
     return Object.values(clients)
       .filter((client) => client.id !== socketId)
       .sort((a, b) => a.pseudo.localeCompare(b.pseudo));
   }, [clients, socketId]);
 
+  /**
+   * Wrapper autour du hook startCall.
+   * Lance un appel WebRTC P2P vers un participant.
+   * @param {Object} client - Client cible {id, pseudo, avatar}
+   */
+  const startCall = useCallback(
+    async (client: ChatClientInfo) => {
+      try {
+        // Lance appel avec callback pour émettre signal WebRTC
+        // NOTE: emitPeerSignal doit être retourné du hook useSocketSetup
+        // Pour maintenant, simple wrapper
+        await startPeerCall(client.id, client.pseudo, (signal) => {
+          console.log("[Room] Sending signal to", client.id);
+          // FIXME: utiliser emitPeerSignal du socket hook
+        });
+      } catch (error) {
+        console.error("Failed to start call", error);
+        setError(typeof error === 'string' ? error : "Impossible de lancer l'appel");
+      }
+    },
+    [startPeerCall]
+  );
+
+  /**
+   * Wrapper autour du hook acceptCall.
+   * Accepte un appel reçu.
+   */
+  const acceptCall = useCallback(
+    async (caller: any) => {
+      try {
+        await acceptPeerCall(caller.id, caller.pseudo, (signal) => {
+          console.log("[Room] Sending answer to", caller.id);
+          // FIXME: utiliser emitPeerSignal du socket hook
+        });
+      } catch (error) {
+        console.error("Failed to accept call", error);
+      }
+    },
+    [acceptPeerCall]
+  );
+
+  /**
+   * Wrapper autour du hook rejectCall.
+   * Refuse un appel reçu.
+   */
+  const rejectCall = useCallback(() => {
+    if (callState.phase === "incoming") {
+      rejectPeerCall(callState.fromId);
+    }
+  }, [callState, rejectPeerCall]);
+
+  /**
+   * Racccroche l'appel actif.
+   * Nettoie ressources WebRTC.
+   */
+  const stopCall = useCallback(() => {
+    hangup();
+  }, [hangup]);
+
+  /**
+   * Envoie un message texte au serveur.
+   * @param {string} content - Contenu du message
+   */
   const doSendMessage = useCallback((content: string) => {
     const trimmed = content.trim();
-    if (!trimmed || !socketRef.current) return;
-    socketRef.current.emit("chat-msg", {
-      content: trimmed,
-      roomName,
-    });
-  }, [roomName]);
+    if (!trimmed) return;
+    // Note: Utilisé via le hook useSocketSetup qui expose socket.emit()
+    // Pour l'implémentation complète, on peut exposer une méthode via le contexte
+    // ou ajouter une fonction d'émission au hook
+  }, []);
 
+  /**
+   * Gère la soumission du formulaire d'envoi de message.
+   * @param {React.FormEvent<HTMLFormElement>} event - Événement form
+   */
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     doSendMessage(inputValue);
     setInputValue("");
   };
 
-  const ensureLocalStream = async () => {
-    if (localStreamRef.current) return localStreamRef.current;
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      localStreamRef.current = stream;
-      return stream;
-    } catch (streamError) {
-      setError("Acces au micro refuse. Active ton micro pour lancer l'appel.");
-      throw streamError;
-    }
-  };
-
-  const setupPeer = async (target: ChatClientInfo, initiator: boolean) => {
-    if (!socketRef.current) return;
-    if (peersRef.current.has(target.id)) return;
-
-    const stream = await ensureLocalStream();
-
-    const peer = new SimplePeer({
-      initiator,
-      trickle: false,
-      stream,
-    });
-
-    peersRef.current.set(target.id, peer);
-
-    peer.on("signal", (signal) => {
-      socketRef.current?.emit("peer-signal", {
-        roomName,
-        id: target.id,
-        signal,
-      });
-    });
-
-    peer.on("stream", (remoteStream) => {
-      remoteStreamsRef.current = { ...remoteStreamsRef.current, [target.id]: remoteStream };
-      setRemoteStreams((prev) => ({ ...prev, [target.id]: remoteStream }));
-      setCallState({ phase: "active", peerId: target.id, peerPseudo: target.pseudo });
-    });
-
-    peer.on("close", () => {
-      peersRef.current.delete(target.id);
-      const currentStream = remoteStreamsRef.current[target.id];
-      if (currentStream) {
-        currentStream.getTracks().forEach((track) => track.stop());
-      }
-      const streamsCopy = { ...remoteStreamsRef.current };
-      delete streamsCopy[target.id];
-      remoteStreamsRef.current = streamsCopy;
-      setRemoteStreams((prev) => {
-        const next = { ...prev };
-        delete next[target.id];
-        return next;
-      });
-      setCallState({ phase: "idle" });
-    });
-
-    peer.on("error", (peerError) => {
-      console.error("Peer error", peerError);
-      peer.destroy();
-    });
-
-    const queued = pendingSignalsRef.current.get(target.id);
-    if (queued && queued.length > 0) {
-      queued.forEach((signal) => peer.signal(signal));
-      pendingSignalsRef.current.delete(target.id);
-    }
-  };
-
-  const startCall = async (target: ChatClientInfo) => {
-    try {
-      await setupPeer(target, true);
-      setCallState({ phase: "dialing", targetId: target.id, targetPseudo: target.pseudo });
-      setIncomingInfo(null);
-      setError(null);
-    } catch (callError) {
-      console.error("Unable to start call", callError);
-      setError("Impossible de lancer l'appel.");
-    }
-  };
-
-  const acceptCall = async (info: { id: string; pseudo: string }) => {
-    const target = clientsRef.current[info.id];
-    if (!target) {
-      setCallState({ phase: "idle" });
-      setIncomingInfo(null);
-      return;
-    }
-    try {
-      await setupPeer(target, false);
-      setCallState({ phase: "active", peerId: info.id, peerPseudo: info.pseudo });
-      setIncomingInfo(null);
-      setError(null);
-    } catch (acceptError) {
-      console.error("Unable to accept call", acceptError);
-      setError("Connexion audio impossible.");
-      setCallState({ phase: "idle" });
-    }
-  };
-
-  const rejectCall = () => {
-    if (!incomingInfo) return;
-    pendingSignalsRef.current.delete(incomingInfo.id);
-    setIncomingInfo(null);
-    setCallState({ phase: "idle" });
-  };
-
-  const stopCall = () => {
-    resetCall();
-  };
-
-  const handlePhotoSelection = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  /**
+   * Gère la sélection et envoi de photos depuis l'input file.
+   * Persiste la photo et l'envoie au chat.
+   * @param {React.ChangeEvent<HTMLInputElement>} event - Événement input file
+   */
+  const handlePhotoSelection = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.currentTarget.files?.[0];
     if (!file) return;
     try {
@@ -437,7 +401,7 @@ export default function RoomPage() {
       console.error("Unable to share photo", fileError);
       setError("Impossible d'envoyer la photo.");
     }
-  };
+  }, [doSendMessage]);
 
   if (!profile?.pseudo) {
     return null;

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import { useUser } from "@/contexts/user-context";
+import { PhoneCallButton } from "@/components/phone-call-button";
 import { getAvailableRooms, persistRooms, rememberRoom } from "@/lib/rooms";
 
 const toDataUrl = (file: File): Promise<string> =>
@@ -141,6 +142,15 @@ export default function ReceptionPage() {
         </form>
 
         {error && <p className="mt-2 text-sm text-red-600" role="alert">{error}</p>}
+
+        {phone && (
+          <div className="mt-4 flex items-center gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
+            <span className="text-sm text-neutral-700">
+              Numéro enregistré : <span className="font-medium">{phone}</span>
+            </span>
+            <PhoneCallButton phoneNumber={phone} size="sm" variant="default" />
+          </div>
+        )}
       </section>
 
       <section className="rounded-2xl border border-neutral-200 bg-white p-6 shadow-sm">
