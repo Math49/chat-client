@@ -1,208 +1,212 @@
-/**
- * @fileoverview Hook de configuration Socket.IO pour communication temps réel.
- * 
- * Encapsule l'initialisation, la gestion des listeners, et le cleanup automatique.
- * Offre une API simplifiée pour émettre messages et signaux peer-to-peer.
- * 
- * Gère l'état de connexion avec notifications de changement d'état.
- * La reconnexion automatique est gérée par socket-client.ts (backoff exponentiel).
- * 
- * @module hooks/use-socket-setup
- */
-
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
-import { createChatSocket, type ChatSocket, type ChatClientInfo, type ChatMessage, type PeerSignalPayload } from "@/lib/socket-client";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createChatSocket,
+  type ChatSocket,
+  type ChatClientInfo,
+  type ChatMessage,
+} from "@/lib/socket-client";
 
+export type SocketStatus = "idle" | "connecting" | "connected" | "error";
 
-/**
- * Configuration Socket.IO pour connexion et événements room.
- * 
- * @typedef {Object} SocketSetupConfig
- * @property {string} roomName - Nom de la room à rejoindre
- * @property {string} pseudo - Pseudo de l'utilisateur courant
- * @property {string} [avatar] - URL avatar optionnel
- * @property {Function} [onConnect] - Callback connexion établie
- * @property {Function} [onDisconnect] - Callback déconnexion
- * @property {Function} [onError] - Callback erreur (reçoit message)
- * @property {Function} [onChatMessage] - Callback message reçu
- * @property {Function} [onJoinedRoom] - Callback room rejointe (reçoit clients)
- * @property {Function} [onDisconnectedUser] - Callback utilisateur déconnecté
- * @property {Function} [onPeerSignal] - Callback signal WebRTC reçu
- * @property {Function} [onStatusChange] - Callback changement état: idle|connecting|connected|error
- */
 export type SocketSetupConfig = {
   roomName: string;
   pseudo: string;
   avatar?: string | null;
+
   onConnect?: () => void;
   onDisconnect?: () => void;
   onError?: (message: string) => void;
   onChatMessage?: (payload: ChatMessage) => void;
   onJoinedRoom?: (clients: Record<string, ChatClientInfo>) => void;
   onDisconnectedUser?: (id: string, pseudo?: string) => void;
-  onPeerSignal?: (id: string, signal: unknown) => void;
-  onStatusChange?: (status: "idle" | "connecting" | "connected" | "error") => void;
+
+  // ✅ On passe aussi le pseudo de l’émetteur
+  onPeerSignal?: (fromId: string, fromPseudo: string | undefined, signal: unknown) => void;
+
+  onStatusChange?: (status: SocketStatus) => void;
 };
 
-/**
- * Hook pour initialiser et gérer la connexion Socket.IO.
- * 
- * Étapes:
- * 1. Crée instance Socket.IO avec reconnexion automatique (backoff exponentiel)
- * 2. Attache listeners pour tous les événements room
- * 3. Lance connexion et rejoint la room
- * 4. Cleanup automatique à unmount
- * 
- * Le hook retourne des méthodes pour émettre messages et signaux peer.
- * 
- * @param {SocketSetupConfig} config - Configuration connexion (room, pseudo, callbacks)
- * @returns {Object} Objet avec socket instance et méthodes emit
- * @returns {ChatSocket} socket - Instance Socket.IO active (peut être null)
- * @returns {Function} emitMessage - Envoyer message au chat (content: string)
- * @returns {Function} emitPeerSignal - Envoyer signal WebRTC (targetId, signal)
- * 
- * @example
- * const { emitMessage, emitPeerSignal } = useSocketSetup({
- *   roomName: "salon",
- *   pseudo: "Alice",
- *   onChatMessage: (msg) => console.log(msg.content),
- *   onStatusChange: (status) => setStatus(status),
- * });
- * emitMessage("Coucou!");
- */
 export function useSocketSetup(config: SocketSetupConfig) {
-  // Référence persistante au socket et état setup
+  const { roomName, pseudo, avatar } = config;
+
   const socketRef = useRef<ChatSocket | null>(null);
-  const isSetupRef = useRef(false);
 
-  /**
-   * Crée et initialise le socket avec tous les listeners.
-   * S'exécute une seule fois (isSetupRef.current guard).
-   */
-  const setupSocket = useCallback(() => {
-    // Évite les setup dupliqués (garde against render race conditions)
-    if (isSetupRef.current || socketRef.current) return;
-    isSetupRef.current = true;
+  const [status, setStatus] = useState<SocketStatus>("idle");
+  const [clients, setClients] = useState<Record<string, ChatClientInfo>>({});
+  const [socketId, setSocketId] = useState<string | null>(null);
 
-    // Crée nouvelle instance Socket.IO
+  const cbRef = useRef({
+    onConnect: config.onConnect,
+    onDisconnect: config.onDisconnect,
+    onError: config.onError,
+    onChatMessage: config.onChatMessage,
+    onJoinedRoom: config.onJoinedRoom,
+    onDisconnectedUser: config.onDisconnectedUser,
+    onPeerSignal: config.onPeerSignal,
+    onStatusChange: config.onStatusChange,
+  });
+
+  useEffect(() => {
+    cbRef.current = {
+      onConnect: config.onConnect,
+      onDisconnect: config.onDisconnect,
+      onError: config.onError,
+      onChatMessage: config.onChatMessage,
+      onJoinedRoom: config.onJoinedRoom,
+      onDisconnectedUser: config.onDisconnectedUser,
+      onPeerSignal: config.onPeerSignal,
+      onStatusChange: config.onStatusChange,
+    };
+  }, [
+    config.onConnect,
+    config.onDisconnect,
+    config.onError,
+    config.onChatMessage,
+    config.onJoinedRoom,
+    config.onDisconnectedUser,
+    config.onPeerSignal,
+    config.onStatusChange,
+  ]);
+
+  const setStatusSafe = useCallback((s: SocketStatus) => {
+    setStatus(s);
+    cbRef.current.onStatusChange?.(s);
+  }, []);
+
+  useEffect(() => {
+    if (!pseudo || !roomName) {
+      setStatusSafe("idle");
+      return;
+    }
+
+    setStatusSafe("connecting");
+
     const socket = createChatSocket();
     socketRef.current = socket;
 
-    // Signale début de connexion
-    config.onStatusChange?.("connecting");
-
-    // ===== HANDLERS pour tous les événements =====
-
     const handleConnect = () => {
-      // Connexion établie: émet join-room et notifie callback
-      config.onStatusChange?.("connected");
+      setStatusSafe("connected");
+      setSocketId(socket.id ?? null);
+
       socket.emit("chat-join-room", {
-        pseudo: config.pseudo,
-        roomName: config.roomName,
-        avatar: config.avatar ?? null,
+        pseudo,
+        roomName,
+        avatar: avatar ?? null,
       });
-      config.onConnect?.();
+
+      cbRef.current.onConnect?.();
     };
 
     const handleDisconnect = () => {
-      // Déconnecté: revenir à idle
-      config.onStatusChange?.("idle");
-      config.onDisconnect?.();
+      setStatusSafe("idle");
+      cbRef.current.onDisconnect?.();
     };
 
     const handleError = (message: string) => {
-      // Erreur socket: marquer état error et notifier
-      config.onStatusChange?.("error");
-      config.onError?.(message);
+      setStatusSafe("error");
+      cbRef.current.onError?.(message);
     };
 
     const handleChatMessage = (payload: ChatMessage) => {
-      // Message reçu: transmettre au callback
-      config.onChatMessage?.(payload);
+      cbRef.current.onChatMessage?.(payload);
     };
 
     const handleJoinedRoom = (payload: { clients: Record<string, ChatClientInfo> }) => {
-      // Room rejointe: lister les clients actifs
-      config.onJoinedRoom?.(payload.clients);
+      setClients(payload.clients);
+      cbRef.current.onJoinedRoom?.(payload.clients);
+
+      if (!socket.id) {
+        const guessedId =
+          Object.keys(payload.clients).find((id) => payload.clients[id]?.pseudo === pseudo) ?? null;
+        setSocketId(guessedId);
+      }
     };
 
-    const handleDisconnected = (payload: { id: string; pseudo?: string }) => {
-      // Utilisateur quitté: notifier pour cleanup UI
-      config.onDisconnectedUser?.(payload.id, payload.pseudo);
+    const handleDisconnectedUser = (payload: { id: string; pseudo?: string }) => {
+      setClients((prev) => {
+        const next = { ...prev };
+        delete next[payload.id];
+        return next;
+      });
+      cbRef.current.onDisconnectedUser?.(payload.id, payload.pseudo);
     };
 
-    const handlePeerSignal = (payload: PeerSignalPayload) => {
-      // Signal WebRTC reçu: transmettre au handler peer
-      config.onPeerSignal?.(payload.id, payload.signal);
+    // ✅ On accepte plusieurs formats payload (robuste)
+    const handlePeerSignal = (payload: any) => {
+      const fromId = payload.fromId ?? payload.senderId ?? payload.id;
+      const fromPseudo = payload.pseudo;
+      const signal = payload.signal ?? payload.offerSignal ?? payload.answerSignal ?? payload.candidate;
+      if (!fromId || !signal) return;
+      cbRef.current.onPeerSignal?.(fromId, fromPseudo, signal);
     };
 
-    // ===== ATTACHEMENT des listeners =====
     socket.on("connect", handleConnect);
     socket.on("disconnect", handleDisconnect);
     socket.on("chat-msg", handleChatMessage);
     socket.on("chat-joined-room", handleJoinedRoom);
-    socket.on("chat-disconnected", handleDisconnected);
+    socket.on("chat-disconnected", handleDisconnectedUser);
     socket.on("peer-signal", handlePeerSignal);
-    socket.on("error", handleError);
-    socket.on("erreur", handleError); // Variante typage serveur
 
-    // Lance la connexion
+    socket.on("error", handleError);
+    socket.on("erreur", handleError);
+
     socket.connect();
 
-    // ===== CLEANUP function =====
     return () => {
-      // Détache tous les listeners
       socket.off("connect", handleConnect);
       socket.off("disconnect", handleDisconnect);
       socket.off("chat-msg", handleChatMessage);
       socket.off("chat-joined-room", handleJoinedRoom);
-      socket.off("chat-disconnected", handleDisconnected);
+      socket.off("chat-disconnected", handleDisconnectedUser);
       socket.off("peer-signal", handlePeerSignal);
       socket.off("error", handleError);
       socket.off("erreur", handleError);
-      
-      // Coupe la connexion
+
       socket.disconnect();
       socketRef.current = null;
-      isSetupRef.current = false;
+
+      setClients({});
+      setSocketId(null);
+      setStatusSafe("idle");
     };
-  }, [config]);
+  }, [roomName, pseudo, avatar, setStatusSafe]);
 
-  // Execute setup au mount, cleanup à unmount
-  useEffect(() => {
-    const cleanup = setupSocket();
-    return cleanup;
-  }, [setupSocket]);
+  const emitMessage = useCallback(
+    (content: string) => {
+      const s = socketRef.current;
+      if (!s) return;
+      const trimmed = content.trim();
+      if (!trimmed) return;
 
-  /**
-   * Émet un message texte au chat.
-   * Trim automatique du contenu pour éviter les espaces inutiles.
-   */
-  const emitMessage = useCallback((content: string) => {
-    if (!socketRef.current) return;
-    socketRef.current.emit("chat-msg", {
-      content: content.trim(),
-      roomName: config.roomName,
-    });
-  }, [config.roomName]);
+      s.emit("chat-msg", { content: trimmed, roomName });
+    },
+    [roomName]
+  );
 
-  /**
-   * Émet un signal WebRTC P2P à un utilisateur spécifique.
-   * Utilisé pour la négociation d'appel audio/vidéo.
-   */
-  const emitPeerSignal = useCallback((targetId: string, signal: unknown) => {
-    if (!socketRef.current) return;
-    socketRef.current.emit("peer-signal", {
-      roomName: config.roomName,
-      id: targetId,
-      signal,
-    });
-  }, [config.roomName]);
+  const emitPeerSignal = useCallback(
+    (targetId: string, signal: unknown) => {
+      const s = socketRef.current;
+      if (!s) return;
+
+      s.emit("peer-signal", {
+        roomName,
+        id: targetId,
+        signal,
+        pseudo,
+      });
+    },
+    [roomName, pseudo]
+  );
+
+  const participants = useMemo(() => Object.values(clients), [clients]);
 
   return {
-    socket: socketRef.current,
+    status,
+    socketId,
+    clients,
+    participants,
     emitMessage,
     emitPeerSignal,
   };

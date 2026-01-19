@@ -1,390 +1,261 @@
-/**
- * @fileoverview Hook de gestion appels audio WebRTC via SimplePeer.
- * 
- * Gère le cycle complet d'un appel P2P:
- * - Cycle: idle → dialing → active → idle (appel lancé)
- * - Cycle: idle → incoming → active → idle (appel reçu)
- * 
- * Caractéristiques:
- * - Buffering automatique des signaux avant creation du peer
- * - Gestion multi-peers (théoriquement plusieurs appels simultanés)
- * - Cleanup complet des streams et ressources au hangup
- * - Événements de changement d'état pour UI
- * 
- * Architecture:
- * - peersRef: Map<userId, SimplePeer instance>
- * - pendingSignalsRef: Map<userId, signal[] buffered>
- * - localStreamRef: MediaStream unique (partagée entre peers)
- * - remoteStreamsRef: Map<userId, remote MediaStream>
- * 
- * @module hooks/use-peer-call
- */
-
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import SimplePeer, { type Instance as SimplePeerInstance } from "simple-peer";
 
-/**
- * Phases possibles d'un appel.
- * @typedef {string} CallPhase - "idle" | "dialing" | "incoming" | "active"
- */
-export type CallPhase = "idle" | "dialing" | "incoming" | "active";
-
-/**
- * État discriminé d'un appel.
- * 
- * Phases:
- * - idle: Aucun appel, prêt pour nouveau
- * - dialing: Appel lancé vers targetId, en attente de réponse
- * - incoming: Appel reçu de fromId, en attente accept/reject
- * - active: Appel actif avec peerId établi
- * 
- * @typedef {Object|Object|Object|Object} CallState
- */
 export type CallState =
   | { phase: "idle" }
-  | { phase: "dialing"; targetId: string; targetPseudo: string }
+  | { phase: "dialing"; targetId: string; targetPseudo: string; startedAt: number }
   | { phase: "incoming"; fromId: string; fromPseudo: string }
   | { phase: "active"; peerId: string; peerPseudo: string };
 
-/**
- * Configuration callbacks du hook.
- * 
- * @typedef {Object} UsePeerCallConfig
- * @property {Function} [onRemoteStream] - Callback stream reçu (peerId, stream)
- * @property {Function} [onCallStateChange] - Callback changement phase appel
- * @property {Function} [onError] - Callback erreurs WebRTC
- */
 export interface UsePeerCallConfig {
-  onRemoteStream?: (peerId: string, stream: MediaStream) => void;
   onCallStateChange?: (state: CallState) => void;
-  onError?: (error: Error | unknown) => void;
+  onError?: (error: Error | string | unknown) => void;
 }
 
+type SignalEmitter = (signal: unknown) => void;
 
-/**
- * Hook gestion appels audio WebRTC (SimplePeer).
- * 
- * Gère l'état de l'appel, création/destruction des peers, et streaming audio.
- * Support multi-peers théorique, usage courant: 1 peer à la fois.
- * 
- * @param {UsePeerCallConfig} config - Callbacks pour événements
- * @returns {Object} API pour contrôler appels
- * @returns {CallState} callState - État courant de l'appel
- * @returns {Record<string, MediaStream>} remoteStreams - Map peerId → stream reçu
- * @returns {Function} startCall - Lancer appel (targetId, targetPseudo, onSignal callback)
- * @returns {Function} acceptCall - Accepter appel reçu (fromId, fromPseudo, onSignal)
- * @returns {Function} rejectCall - Refuser appel reçu (fromId)
- * @returns {Function} handleIncomingSignal - Traiter signal WebRTC entrant
- * @returns {Function} hangup - Raccroche et nettoie toutes ressources
- * @returns {Function} getStats - Retourne stats pour debugging
- * 
- * @example
- * const { callState, startCall, hangup } = usePeerCall({
- *   onRemoteStream: (peerId, stream) => audioRef.current.srcObject = stream,
- *   onCallStateChange: (state) => setStatus(state.phase),
- * });
- * // Lancer un appel
- * await startCall("peer123", "Alice", (signal) => emitPeerSignal("peer123", signal));
- * // Raccrocher
- * hangup();
- */
+type ControlSignal = { type: "reject" } | { type: "hangup" };
+
+const isControlSignal = (s: unknown): s is ControlSignal => {
+  return !!s && typeof s === "object" && "type" in s && ((s as any).type === "reject" || (s as any).type === "hangup");
+};
+
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+];
+
 export function usePeerCall(config: UsePeerCallConfig = {}) {
-  // ===== RÉFÉRENCES PERSISTANTES =====
+  const onCallStateChangeRef = useRef(config.onCallStateChange);
+  const onErrorRef = useRef(config.onError);
 
-  // Map userId → SimplePeer instance active
-  const peersRef = useRef<Map<string, SimplePeerInstance>>(new Map());
+  useEffect(() => {
+    onCallStateChangeRef.current = config.onCallStateChange;
+    onErrorRef.current = config.onError;
+  }, [config.onCallStateChange, config.onError]);
 
-  // Map userId → signals en attente (buffering avant peer ready)
-  const pendingSignalsRef = useRef<Map<string, unknown[]>>(new Map());
-
-  // MediaStream local (partagée entre tous les peers)
-  const localStreamRef = useRef<MediaStream | null>(null);
-
-  // Map userId → remote stream reçu
-  const remoteStreamsRef = useRef<Record<string, MediaStream>>({});
-
-  // ===== STATE (STATE MANAGEMENT) =====
-
-  // Phase appel courant pour UI
   const [callState, setCallState] = useState<CallState>({ phase: "idle" });
 
-  // Streams reçus (pour React render)
-  const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+  const peerRef = useRef<SimplePeerInstance | null>(null);
+  const peerMetaRef = useRef<{ id: string; pseudo: string; onSignal: SignalEmitter } | null>(null);
 
-  // ===== HELPERS =====
+  const localStreamRef = useRef<MediaStream | null>(null);
 
-  /**
-   * Demande accès microphone (getUserMedia) et cache le stream.
-   * Idempotent: retourne même stream si déjà obtenu.
-   * 
-   * @returns {Promise<MediaStream>} Stream audio local
-   * @throws {Error} Si permission refusée ou device indisponible
-   */
-  const ensureLocalStream = useCallback(async (): Promise<MediaStream> => {
-    // Retour rapide si stream déjà obtenu
+  // Buffer de signaux reçus avant que le peer soit prêt (offer/candidates/answer)
+  const pendingSignalsRef = useRef<Map<string, unknown[]>>(new Map());
+
+  const setStateSafe = useCallback((state: CallState) => {
+    setCallState(state);
+    onCallStateChangeRef.current?.(state);
+  }, []);
+
+  const ensureLocalStream = useCallback(async () => {
     if (localStreamRef.current) return localStreamRef.current;
-
     try {
-      // Demande accès micro uniquement (pas vidéo)
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: false,
       });
       localStreamRef.current = stream;
       return stream;
-    } catch (error) {
-      // Notifie erreur et throw pour caller
-      config.onError?.(error);
-      throw error;
+    } catch (e) {
+      onErrorRef.current?.(e);
+      throw e;
     }
-  }, [config]);
+  }, []);
 
-  /**
-   * Configure une connexion SimplePeer avec un utilisateur.
-   * 
-   * Étapes:
-   * 1. Crée instance SimplePeer (initiator = who started call)
-   * 2. Attache listeners: signal, stream, close, error
-   * 3. Traite signaux en attente (buffering)
-   * 4. Stocke peer dans map pour lifecycle management
-   * 
-   * @param {string} targetId - ID utilisateur peer
-   * @param {string} targetPseudo - Pseudo affichage
-   * @param {boolean} initiator - true si on lance l'appel
-   * @param {Function} onSignal - Callback emit signal WebRTC au serveur
-   * @throws {Error} Si getUserMedia échoue
-   */
-  const setupPeer = useCallback(
-    async (targetId: string, targetPseudo: string, initiator: boolean, onSignal: (signal: unknown) => void) => {
-      // Évite setup dupliqué (idempotent guard)
-      if (peersRef.current.has(targetId)) return;
-
-      // Obtient ou demande stream local
-      const stream = await ensureLocalStream();
-
-      // Crée peer SimplePeer avec configuration
-      const peer = new SimplePeer({
-        initiator, // true = on lance offer, false = on attend answer
-        trickle: false, // ice candidates grouped dans offer/answer (simpler)
-        stream, // Attach notre stream audio
-      });
-
-      // Stocke dans map pour références futures
-      peersRef.current.set(targetId, peer);
-
-      // ===== EVENT HANDLERS =====
-
-      // Signal généré: émettre via socket
-      peer.on("signal", (signal) => {
-        onSignal(signal);
-      });
-
-      // Stream reçu du peer: mettre à jour state et callbacks
-      peer.on("stream", (remoteStream) => {
-        // Cache stream pour cleanup
-        remoteStreamsRef.current[targetId] = remoteStream;
-        // Met à jour React state (trigger render)
-        setRemoteStreams((prev) => ({ ...prev, [targetId]: remoteStream }));
-        // Notifie callback (pour UI: attacher à <audio>)
-        config.onRemoteStream?.(targetId, remoteStream);
-        // Marque appel actif (transition dialing → active)
-        setCallState({ phase: "active", peerId: targetId, peerPseudo: targetPseudo });
-        config.onCallStateChange?.({ phase: "active", peerId: targetId, peerPseudo: targetPseudo });
-      });
-
-      // Connexion fermée: cleanup peer
-      peer.on("close", () => {
-        // Retire de map
-        peersRef.current.delete(targetId);
-        
-        // Stop tracks du stream reçu
-        const currentStream = remoteStreamsRef.current[targetId];
-        if (currentStream) {
-          currentStream.getTracks().forEach((track) => track.stop());
-        }
-        
-        // Nettoie références
-        delete remoteStreamsRef.current[targetId];
-        setRemoteStreams((prev) => {
-          const next = { ...prev };
-          delete next[targetId];
-          return next;
-        });
-        
-        // Retour à idle
-        setCallState({ phase: "idle" });
-        config.onCallStateChange?.({ phase: "idle" });
-      });
-
-      // Erreur peer: log et notifie
-      peer.on("error", (peerError) => {
-        console.error("[PeerCall] Peer error", peerError);
-        config.onError?.(peerError);
-        peer.destroy();
-      });
-
-      // ===== SIGNAL BUFFERING =====
-      // Traite les signaux qui arrivaient avant création du peer
-      const queued = pendingSignalsRef.current.get(targetId);
-      if (queued && queued.length > 0) {
-        queued.forEach((signal) => peer.signal(signal));
-        pendingSignalsRef.current.delete(targetId);
-      }
-    },
-    [config, ensureLocalStream]
-  );
-
-  // ===== PUBLIC API =====
-
-  /**
-   * Lance un appel vers un utilisateur.
-   * 
-   * Étapes:
-   * 1. Setup peer avec initiator=true
-   * 2. Met état à "dialing"
-   * 3. Appel onSignal pour émettre offer via socket
-   * 
-   * @param {string} targetId - Qui on appelle
-   * @param {string} targetPseudo - Son pseudo
-   * @param {Function} onSignal - Émettre signal WebRTC au serveur
-   * @returns {Promise<void>}
-   */
-  const startCall = useCallback(
-    async (targetId: string, targetPseudo: string, onSignal: (signal: unknown) => void) => {
-      try {
-        await setupPeer(targetId, targetPseudo, true, onSignal);
-        setCallState({ phase: "dialing", targetId, targetPseudo });
-        config.onCallStateChange?.({ phase: "dialing", targetId, targetPseudo });
-      } catch (error) {
-        config.onError?.(error);
-        throw error;
-      }
-    },
-    [setupPeer, config]
-  );
-
-  /**
-   * Accepte un appel entrant.
-   * 
-   * Étapes:
-   * 1. Setup peer avec initiator=false (on attend answer)
-   * 2. Met état à "active" (assuming will connect)
-   * 3. Appel onSignal pour émettre answer
-   * 
-   * @param {string} fromId - Qui nous appelle
-   * @param {string} fromPseudo - Son pseudo
-   * @param {Function} onSignal - Émettre signal WebRTC réponse
-   * @returns {Promise<void>}
-   */
-  const acceptCall = useCallback(
-    async (fromId: string, fromPseudo: string, onSignal: (signal: unknown) => void) => {
-      try {
-        await setupPeer(fromId, fromPseudo, false, onSignal);
-        setCallState({ phase: "active", peerId: fromId, peerPseudo: fromPseudo });
-        config.onCallStateChange?.({ phase: "active", peerId: fromId, peerPseudo: fromPseudo });
-      } catch (error) {
-        config.onError?.(error);
-        setCallState({ phase: "idle" });
-        config.onCallStateChange?.({ phase: "idle" });
-        throw error;
-      }
-    },
-    [setupPeer, config]
-  );
-
-  /**
-   * Refuse un appel entrant.
-   * Nettoie buffers signaux et retour à idle.
-   */
-  const rejectCall = useCallback((fromId: string) => {
-    pendingSignalsRef.current.delete(fromId);
-    setCallState({ phase: "idle" });
-    config.onCallStateChange?.({ phase: "idle" });
-  }, [config]);
-
-  /**
-   * Traite un signal WebRTC entrant (offer/answer/ice candidate).
-   * 
-   * Logique:
-   * - Si peer existe: envoyer signal directement
-   * - Si pas de peer: buffer le signal et notifier incoming call
-   * 
-   * Cela gère le cas où signaux arrivent avant setup peer.
-   * 
-   * @param {string} fromId - Qui envoie signal
-   * @param {string} fromPseudo - Son pseudo
-   * @param {unknown} signal - Signal WebRTC (offer/answer/ice)
-   */
-  const handleIncomingSignal = useCallback((fromId: string, fromPseudo: string, signal: unknown) => {
-    // Peer existant: signal directement
-    const existing = peersRef.current.get(fromId);
-    if (existing) {
-      existing.signal(signal);
-      return;
-    }
-
-    // Peer pas encore prêt: buffer et notifier incoming
-    const queue = pendingSignalsRef.current.get(fromId) ?? [];
-    queue.push(signal);
-    pendingSignalsRef.current.set(fromId, queue);
-
-    // Notifie caller d'un appel reçu (UI affiche accept/reject)
-    setCallState({ phase: "incoming", fromId, fromPseudo });
-    config.onCallStateChange?.({ phase: "incoming", fromId, fromPseudo });
-  }, [config]);
-
-  /**
-   * Raccroche et nettoie toutes ressources (peers, streams).
-   * 
-   * Étapes:
-   * 1. Destroy tous les peers
-   * 2. Stop tous les tracks distants
-   * 3. Stop et libère stream local
-   * 4. Retour à idle
-   */
-  const hangup = useCallback(() => {
-    // Ferme tous les peers
-    peersRef.current.forEach((peer) => peer.destroy());
-    peersRef.current.clear();
-
-    // Stop tous les tracks distants
-    Object.values(remoteStreamsRef.current).forEach((stream) => {
-      stream.getTracks().forEach((track) => track.stop());
-    });
-    remoteStreamsRef.current = {};
-    setRemoteStreams({});
-
-    // Stop et libère stream local
+  const cleanupLocalStream = useCallback(() => {
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => track.stop());
+      localStreamRef.current.getTracks().forEach((t) => t.stop());
       localStreamRef.current = null;
     }
+  }, []);
 
-    // Reset état
-    setCallState({ phase: "idle" });
-    config.onCallStateChange?.({ phase: "idle" });
-    pendingSignalsRef.current.clear();
-  }, [config]);
+  const destroyPeer = useCallback(
+    (opts?: { keepLocalStream?: boolean }) => {
+      const peer = peerRef.current;
+      peerRef.current = null;
+      peerMetaRef.current = null;
 
-  /**
-   * Retourne stats pour debugging (nombre peers, streams, etc).
-   */
-  const getStats = () => ({
-    peersCount: peersRef.current.size,
-    remoteStreamsCount: Object.keys(remoteStreamsRef.current).length,
-    hasLocalStream: !!localStreamRef.current,
-  });
+      try {
+        peer?.destroy();
+      } catch {
+        // ignore
+      }
+
+      pendingSignalsRef.current.clear();
+
+      if (!opts?.keepLocalStream) cleanupLocalStream();
+
+      setStateSafe({ phase: "idle" });
+    },
+    [cleanupLocalStream, setStateSafe]
+  );
+
+  const flushPendingSignals = useCallback((peerId: string) => {
+    const peer = peerRef.current;
+    if (!peer) return;
+
+    const queued = pendingSignalsRef.current.get(peerId);
+    if (!queued || queued.length === 0) return;
+
+    queued.forEach((s) => {
+      try {
+        peer.signal(s as any);
+      } catch (e) {
+        onErrorRef.current?.(e);
+      }
+    });
+
+    pendingSignalsRef.current.delete(peerId);
+  }, []);
+
+  const createPeer = useCallback(
+    async (peerId: string, peerPseudo: string, initiator: boolean, onSignal: SignalEmitter) => {
+      if (peerRef.current) return; // 1 appel à la fois
+
+      const localStream = await ensureLocalStream();
+
+      const peer = new SimplePeer({
+        initiator,
+        trickle: true, // ✅ IMPORTANT : envoie des CANDIDATE
+        stream: localStream,
+        config: { iceServers: ICE_SERVERS },
+      });
+
+      peerRef.current = peer;
+      peerMetaRef.current = { id: peerId, pseudo: peerPseudo, onSignal };
+
+      peer.on("signal", (signal) => {
+        // signal = offer / answer / candidate (selon trickle)
+        try {
+          onSignal(signal);
+        } catch (e) {
+          onErrorRef.current?.(e);
+        }
+      });
+
+      peer.on("stream", (_remoteStream) => {
+        // En audio-only, "stream" arrive quand la connexion est ok
+        setStateSafe({ phase: "active", peerId, peerPseudo });
+      });
+
+      peer.on("close", () => {
+        destroyPeer({ keepLocalStream: false });
+      });
+
+      peer.on("error", (err) => {
+        onErrorRef.current?.(err);
+        destroyPeer({ keepLocalStream: false });
+      });
+
+      // Si on a déjà reçu offer/candidates en avance
+      flushPendingSignals(peerId);
+    },
+    [destroyPeer, ensureLocalStream, flushPendingSignals, setStateSafe]
+  );
+
+  const startCall = useCallback(
+    async (targetId: string, targetPseudo: string, onSignal: SignalEmitter) => {
+      if (peerRef.current) {
+        onErrorRef.current?.("Un appel est déjà en cours");
+        return;
+      }
+
+      setStateSafe({ phase: "dialing", targetId, targetPseudo, startedAt: Date.now() });
+      await createPeer(targetId, targetPseudo, true, onSignal);
+    },
+    [createPeer, setStateSafe]
+  );
+
+  const acceptCall = useCallback(
+    async (fromId: string, fromPseudo: string, onSignal: SignalEmitter) => {
+      if (peerRef.current) {
+        onErrorRef.current?.("Un appel est déjà en cours");
+        return;
+      }
+      // On garde incoming jusqu’à ce que "stream" arrive => passe active
+      await createPeer(fromId, fromPseudo, false, onSignal);
+      flushPendingSignals(fromId);
+    },
+    [createPeer, flushPendingSignals]
+  );
+
+  const rejectCall = useCallback(
+    (fromId: string) => {
+      pendingSignalsRef.current.delete(fromId);
+      setStateSafe({ phase: "idle" });
+    },
+    [setStateSafe]
+  );
+
+  const handleIncomingSignal = useCallback(
+    (fromId: string, fromPseudo: string, signal: unknown) => {
+      // Gestion des signaux de contrôle attendus
+      if (isControlSignal(signal)) {
+        if (signal.type === "reject") {
+          destroyPeer({ keepLocalStream: false });
+          onErrorRef.current?.("Appel refusé");
+          return;
+        }
+        if (signal.type === "hangup") {
+          destroyPeer({ keepLocalStream: false });
+          onErrorRef.current?.("Appel terminé");
+          return;
+        }
+      }
+
+      // Si un peer existe déjà pour ce fromId => forward direct
+      if (peerMetaRef.current?.id === fromId && peerRef.current) {
+        try {
+          peerRef.current.signal(signal as any);
+        } catch (e) {
+          onErrorRef.current?.(e);
+        }
+        return;
+      }
+
+      // Sinon on buffer
+      const q = pendingSignalsRef.current.get(fromId) ?? [];
+      q.push(signal);
+      pendingSignalsRef.current.set(fromId, q);
+
+      // Si on est en train d’appeler quelqu’un d’autre, on ignore l’incoming UI
+      if (callState.phase === "dialing" && callState.targetId !== fromId) return;
+      if (callState.phase === "active") return;
+
+      // Passe en incoming si nécessaire
+      if (callState.phase !== "incoming" || callState.fromId !== fromId) {
+        setStateSafe({ phase: "incoming", fromId, fromPseudo });
+      }
+    },
+    [callState, destroyPeer, setStateSafe]
+  );
+
+  // Timeout dialing
+  useEffect(() => {
+    if (callState.phase !== "dialing") return;
+
+    const timer = window.setTimeout(() => {
+      destroyPeer({ keepLocalStream: false });
+      onErrorRef.current?.("Aucune réponse (timeout)");
+    }, 30_000);
+
+    return () => window.clearTimeout(timer);
+  }, [callState, destroyPeer]);
+
+  const hangup = useCallback(() => {
+    destroyPeer({ keepLocalStream: false });
+  }, [destroyPeer]);
 
   return {
     callState,
-    remoteStreams,
     startCall,
     acceptCall,
     rejectCall,
     handleIncomingSignal,
     hangup,
-    getStats,
   };
 }

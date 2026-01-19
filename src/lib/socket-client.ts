@@ -79,6 +79,7 @@ export type PeerSignalPayload = {
   signal: unknown;
   id: string;
   roomName: string;
+  pseudo: string;
 };
 
 /** Alias pour symétrie avec client→server */

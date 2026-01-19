@@ -3,6 +3,7 @@
     initiator?: boolean;
     trickle?: boolean;
     stream?: MediaStream;
+    config?: RTCConfiguration;
   }
 
   interface SimplePeerInstance extends EventTarget {
