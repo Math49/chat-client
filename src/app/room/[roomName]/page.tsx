@@ -19,10 +19,7 @@ import {
   ModalFooter,
   ModalHeader,
   ScrollShadow,
-  Dropdown,
-  DropdownTrigger,
-  DropdownMenu,
-  DropdownItem,
+  useDisclosure,
 } from "@heroui/react";
 
 import { useUser } from "@/contexts/user-context";
@@ -80,6 +77,8 @@ export default function RoomPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [search, setSearch] = useState("");
+  const [callDuration, setCallDuration] = useState(0);
+  const { isOpen: isParticipantsOpen, onOpen: onParticipantsOpen, onOpenChange: onParticipantsOpenChange } = useDisclosure();
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const clientsRef = useRef<Record<string, ChatClientInfo>>({});
@@ -100,6 +99,7 @@ export default function RoomPage() {
 
   const {
     callState,
+    remoteStream,
     startCall: startPeerCall,
     acceptCall: acceptPeerCall,
     rejectCall: rejectPeerCall,
@@ -171,7 +171,6 @@ export default function RoomPage() {
       }
     },
 
-    // ✅ Signaux entrants (offer/answer/candidate/reject/hangup)
     onPeerSignal: (fromId, fromPseudo, signal) => {
       const pseudoGuess = fromPseudo ?? clientsRef.current[fromId]?.pseudo ?? "Inconnu";
       handleIncomingSignal(fromId, pseudoGuess, signal);
@@ -189,7 +188,6 @@ export default function RoomPage() {
       });
 
       if (callState.phase === "active" && callState.peerId === id) {
-        // l'autre est parti => on raccroche localement
         hangup();
       }
     },
@@ -198,6 +196,19 @@ export default function RoomPage() {
   useEffect(() => {
     clientsRef.current = clients;
   }, [clients]);
+
+  useEffect(() => {
+    if (callState.phase !== "active") {
+      setCallDuration(0);
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setCallDuration((prev) => prev + 1);
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [callState.phase]);
 
   useEffect(() => {
     if (!isReady || !profile?.pseudo) return;
@@ -222,7 +233,6 @@ export default function RoomPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
-  // ✅ participants avec id injecté (Object.entries)
   const participants = useMemo(() => {
     const list = Object.entries(clients)
       .filter(([id]) => id !== socketId)
@@ -272,7 +282,6 @@ export default function RoomPage() {
     [doSendMessage]
   );
 
-  // ✅ Call actions alignées sur ton "CallManager"
   const startCall = useCallback(
     async (client: ChatClientInfo) => {
       if (!client?.id) {
@@ -282,7 +291,7 @@ export default function RoomPage() {
       setError(null);
 
       await startPeerCall(client.id, client.pseudo, (signal) => {
-        emitPeerSignal(client.id, signal); // OFFER + CANDIDATE + …
+        emitPeerSignal(client.id, signal);
       });
     },
     [emitPeerSignal, startPeerCall]
@@ -292,7 +301,7 @@ export default function RoomPage() {
     async (fromId: string, fromPseudo: string) => {
       setError(null);
       await acceptPeerCall(fromId, fromPseudo, (signal) => {
-        emitPeerSignal(fromId, signal); // ANSWER + CANDIDATE
+        emitPeerSignal(fromId, signal);
       });
     },
     [acceptPeerCall, emitPeerSignal]
@@ -300,13 +309,11 @@ export default function RoomPage() {
 
   const rejectCall = useCallback(() => {
     if (callState.phase !== "incoming") return;
-    // ✅ on envoie REJECT au caller
     emitPeerSignal(callState.fromId, { type: "reject" });
     rejectPeerCall(callState.fromId);
   }, [callState, emitPeerSignal, rejectPeerCall]);
 
   const stopCall = useCallback(() => {
-    // ✅ on envoie HANGUP à l’autre, quel que soit dialing/active
     if (callState.phase === "active") {
       emitPeerSignal(callState.peerId, { type: "hangup" });
     }
@@ -316,12 +323,21 @@ export default function RoomPage() {
     hangup();
   }, [callState, emitPeerSignal, hangup]);
 
+  const formatDuration = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
+
   if (!profile?.pseudo) return null;
 
   const incomingInfo = callState.phase === "incoming" ? { id: callState.fromId, pseudo: callState.fromPseudo } : null;
 
   return (
     <div className="grid gap-4 p-4">
+      {/* Audio distant caché */}
+      {remoteStream && <RemoteAudio stream={remoteStream} />}
+
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -345,6 +361,9 @@ export default function RoomPage() {
         </div>
 
         <div className="flex gap-2">
+          <Button color="primary" onPress={onParticipantsOpen} variant="flat">
+            Participants ({participants.length})
+          </Button>
           <Button as={Link} href="/reception" variant="flat">
             Réception
           </Button>
@@ -362,179 +381,68 @@ export default function RoomPage() {
         </Card>
       )}
 
-      <section className="grid gap-4 lg:grid-cols-[2fr,1fr]">
-        {/* Chat */}
-        <Card className="h-[560px]">
-          <CardHeader className="flex items-center justify-between">
-            <div className="font-semibold">Messages</div>
-            <div className="text-xs opacity-70">Connecté en tant que {profile.pseudo}</div>
-          </CardHeader>
-          <Divider />
-          <CardBody className="flex h-full flex-col gap-3">
-            <ScrollShadow className="flex-1 pr-2">
-              <div className="space-y-3 max-h-[400px] overflow-y-auto px-1">
-                {messages.map((m) => (
-                  <div
-                    key={m.id}
-                    className={`rounded-2xl p-3 text-sm ${
-                      m.type === "info"
-                        ? "bg-default-100 text-default-600"
-                        : m.isMine
-                          ? "bg-primary-50 text-primary-900"
-                          : "bg-content2"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between text-xs opacity-70">
-                      <span className="font-semibold">{m.pseudo}</span>
-                      <span>{m.date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-                    </div>
-                    <div className="mt-2">
-                      {m.isImage ? (
-                        <img src={m.content} alt="Photo partagee" className="max-h-72 rounded-xl object-contain" />
-                      ) : (
-                        <p className="leading-relaxed">{m.content}</p>
-                      )}
-                    </div>
+      {/* Chat - Full Width */}
+      <Card className="h-[calc(100vh-250px)]">
+        <CardHeader className="flex items-center justify-between">
+          <div className="font-semibold">Messages</div>
+          <div className="text-xs opacity-70">Connecté en tant que {profile.pseudo}</div>
+        </CardHeader>
+        <Divider />
+        <CardBody className="flex h-full flex-col gap-3">
+          <ScrollShadow className="flex-1 pr-2">
+            <div className="space-y-3 px-1">
+              {messages.map((m) => (
+                <div
+                  key={m.id}
+                  className={`rounded-2xl p-3 text-sm ${
+                    m.type === "info"
+                      ? "bg-default-100 text-default-600"
+                      : m.isMine
+                        ? "bg-primary-50 text-primary-900"
+                        : "bg-content2"
+                  }`}
+                >
+                  <div className="flex items-center justify-between text-xs opacity-70">
+                    <span className="font-semibold">{m.pseudo}</span>
+                    <span>{m.date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                   </div>
-                ))}
-                <div ref={messagesEndRef} />
-              </div>
-            </ScrollShadow>
+                  <div className="mt-2">
+                    {m.isImage ? (
+                      <img src={m.content} alt="Photo partagee" className="max-h-72 rounded-xl object-contain" />
+                    ) : (
+                      <p className="leading-relaxed">{m.content}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
+              <div ref={messagesEndRef} />
+            </div>
+          </ScrollShadow>
 
-            <form onSubmit={handleSubmit} className="flex items-center gap-2">
-              <Input
-                value={inputValue}
-                onValueChange={setInputValue}
-                placeholder="Ton message"
-                variant="bordered"
-                radius="lg"
-              />
-              <label className="cursor-pointer">
-                <input type="file" accept="image/*" className="hidden" onChange={handlePhotoSelection} />
-                <Button type="button" variant="flat">
-                  Photo
-                </Button>
-              </label>
-              <Button
-                type="submit"
-                color="primary"
-                isDisabled={!inputValue.trim() || socketStatus !== "connected"}
-              >
-                Envoyer
+          <form onSubmit={handleSubmit} className="flex items-center gap-2">
+            <Input
+              value={inputValue}
+              onValueChange={setInputValue}
+              placeholder="Ton message"
+              variant="bordered"
+              radius="lg"
+            />
+            <label className="cursor-pointer">
+              <input type="file" accept="image/*" className="hidden" onChange={handlePhotoSelection} />
+              <Button type="button" variant="flat">
+                Photo
               </Button>
-            </form>
-          </CardBody>
-        </Card>
-
-        {/* Side: Participants + Call */}
-        <div className="space-y-4">
-          {/* Participants */}
-          <Card>
-            <CardHeader className="flex items-center justify-between">
-              <div className="font-semibold">Participants</div>
-              <Chip size="sm" variant="flat">{participants.length}</Chip>
-            </CardHeader>
-            <Divider />
-            <CardBody className="space-y-3">
-              <Input
-                value={search}
-                onValueChange={setSearch}
-                placeholder="Rechercher…"
-                variant="bordered"
-                radius="lg"
-              />
-
-              <ScrollShadow className="max-h-[240px] pr-2">
-                <div className="space-y-2">
-                  {participants.length === 0 && (
-                    <div className="text-sm opacity-70">Tu es seul dans ce salon.</div>
-                  )}
-
-                  {participants.map((p) => (
-                    <div
-                      key={p.id}
-                      className="flex items-center justify-between gap-2 rounded-2xl bg-content2 px-3 py-2"
-                    >
-                      <div className="flex items-center gap-3">
-                        <Avatar name={p.pseudo} size="sm" />
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-semibold">{p.pseudo}</div>
-                          <div className="text-xs opacity-60">En ligne</div>
-                        </div>
-                      </div>
-
-                      <Dropdown>
-                        <DropdownTrigger>
-                          <Button size="sm" variant="flat">
-                            Actions
-                          </Button>
-                        </DropdownTrigger>
-                        <DropdownMenu aria-label="participant-actions">
-                          <DropdownItem
-                            key="call"
-                            onPress={() => startCall(p)}
-                            isDisabled={callState.phase === "active" || callState.phase === "dialing"}
-                          >
-                            Appeler (audio)
-                          </DropdownItem>
-                          <DropdownItem
-                            key="tel"
-                            as="a"
-                            href="tel:+33600000000"
-                            description="Exemple — remplace par un numéro réel si tu en as"
-                          >
-                            Appel téléphone (tel:)
-                          </DropdownItem>
-                        </DropdownMenu>
-                      </Dropdown>
-                    </div>
-                  ))}
-                </div>
-              </ScrollShadow>
-            </CardBody>
-          </Card>
-
-          {/* Call Status */}
-          <Card>
-            <CardHeader className="flex items-center justify-between">
-              <div className="font-semibold">Appel</div>
-              <Chip size="sm" color={callState.phase === "active" ? "success" : callState.phase === "idle" ? "default" : "warning"} variant="flat">
-                {callState.phase}
-              </Chip>
-            </CardHeader>
-            <Divider />
-            <CardBody className="space-y-3">
-              {callState.phase === "idle" && (
-                <div className="text-sm opacity-70">
-                  Lance un appel depuis la liste des participants.
-                </div>
-              )}
-
-              {callState.phase === "dialing" && (
-                <div className="flex items-center justify-between">
-                  <div className="text-sm">
-                    Appel vers <span className="font-semibold">{callState.targetPseudo}</span>
-                  </div>
-                  <Button color="danger" variant="flat" onPress={stopCall}>
-                    Annuler
-                  </Button>
-                </div>
-              )}
-
-              {callState.phase === "active" && (
-                <div className="flex items-center justify-between">
-                  <div className="text-sm">
-                    En ligne avec <span className="font-semibold">{callState.peerPseudo}</span>
-                  </div>
-                  <Button color="danger" onPress={stopCall}>
-                    Raccrocher
-                  </Button>
-                </div>
-              )}
-            </CardBody>
-          </Card>
-        </div>
-      </section>
+            </label>
+            <Button
+              type="submit"
+              color="primary"
+              isDisabled={!inputValue.trim() || socketStatus !== "connected"}
+            >
+              Envoyer
+            </Button>
+          </form>
+        </CardBody>
+      </Card>
 
       {/* Incoming call modal */}
       <Modal isOpen={callState.phase === "incoming"} onOpenChange={() => {}}>
@@ -544,7 +452,7 @@ export default function RoomPage() {
               <ModalHeader>Appel entrant</ModalHeader>
               <ModalBody>
                 <div className="text-sm">
-                  {incomingInfo?.pseudo} t’appelle.
+                  {incomingInfo?.pseudo} t'appelle.
                 </div>
               </ModalBody>
               <ModalFooter>
@@ -566,6 +474,95 @@ export default function RoomPage() {
         </ModalContent>
       </Modal>
 
+      {/* Participants Modal */}
+      <Modal isOpen={isParticipantsOpen} onOpenChange={onParticipantsOpenChange} size="lg" scrollBehavior="inside">
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader className="flex flex-col gap-1">Participants ({participants.length})</ModalHeader>
+              <ModalBody className="gap-4">
+                <Input
+                  value={search}
+                  onValueChange={setSearch}
+                  placeholder="Rechercher…"
+                  variant="bordered"
+                  radius="lg"
+                />
+
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {participants.length === 0 && (
+                    <div className="text-sm opacity-70">Tu es seul dans ce salon.</div>
+                  )}
+
+                  {participants.map((p) => (
+                    <div
+                      key={p.id}
+                      className="flex items-center justify-between gap-2 rounded-2xl bg-content2 px-4 py-3"
+                    >
+                      <div className="flex items-center gap-3">
+                        <Avatar name={p.pseudo} size="sm" />
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-semibold">{p.pseudo}</div>
+                          <div className="text-xs opacity-60">En ligne</div>
+                        </div>
+                      </div>
+
+                      <Button
+                        size="sm"
+                        color="primary"
+                        variant="flat"
+                        onPress={() => startCall(p)}
+                        isDisabled={callState.phase === "active" || callState.phase === "dialing"}
+                      >
+                        Appeler
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Call Status in modal */}
+                {callState.phase !== "idle" && (
+                  <Card>
+                    <CardHeader className="flex items-center justify-between">
+                      <div className="font-semibold">Appel</div>
+                      <Chip size="sm" color={callState.phase === "active" ? "success" : "warning"} variant="flat">
+                        {callState.phase}
+                      </Chip>
+                    </CardHeader>
+                    <Divider />
+                    <CardBody className="space-y-3">
+                      {callState.phase === "dialing" && (
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm">
+                            Appel vers <span className="font-semibold">{callState.targetPseudo}</span>...
+                          </div>
+                          <Button color="danger" variant="flat" onPress={stopCall} size="sm">
+                            Annuler
+                          </Button>
+                        </div>
+                      )}
+
+                      {callState.phase === "active" && (
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="space-y-1">
+                            <div className="text-sm">
+                              En ligne avec <span className="font-semibold">{callState.peerPseudo}</span>
+                            </div>
+                            <div className="text-xs text-default-500">Durée: {formatDuration(callDuration)}</div>
+                          </div>
+                          <Button color="danger" onPress={stopCall} size="sm">
+                            Raccrocher
+                          </Button>
+                        </div>
+                      )}
+                    </CardBody>
+                  </Card>
+                )}
+              </ModalBody>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
     </div>
   );
 }

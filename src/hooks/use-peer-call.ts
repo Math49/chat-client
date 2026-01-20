@@ -37,6 +37,7 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
   }, [config.onCallStateChange, config.onError]);
 
   const [callState, setCallState] = useState<CallState>({ phase: "idle" });
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
 
   const peerRef = useRef<SimplePeerInstance | null>(null);
   const peerMetaRef = useRef<{ id: string; pseudo: string; onSignal: SignalEmitter } | null>(null);
@@ -86,6 +87,7 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
       }
 
       pendingSignalsRef.current.clear();
+      setRemoteStream(null);
 
       if (!opts?.keepLocalStream) cleanupLocalStream();
 
@@ -139,6 +141,7 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
 
       peer.on("stream", (_remoteStream) => {
         // En audio-only, "stream" arrive quand la connexion est ok
+        setRemoteStream(_remoteStream);
         setStateSafe({ phase: "active", peerId, peerPseudo });
       });
 
@@ -252,6 +255,7 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
 
   return {
     callState,
+    remoteStream,
     startCall,
     acceptCall,
     rejectCall,
