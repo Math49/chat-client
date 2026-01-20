@@ -3,6 +3,7 @@ name: Build & Push Docker (GHCR)
 on:
   push:
     branches: ["master"]
+  workflow_dispatch:
 
 permissions:
   contents: read
