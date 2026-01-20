@@ -65,6 +65,19 @@ const RemoteAudio = ({ stream }: { stream: MediaStream }) => {
   return <audio ref={ref} autoPlay playsInline className="hidden" />;
 };
 
+const RemoteVideo = ({ stream }: { stream: MediaStream }) => {
+  const ref = useRef<HTMLVideoElement | null>(null);
+  useEffect(() => {
+    if (!ref.current) return;
+    ref.current.srcObject = stream;
+    ref.current.play().catch(() => undefined);
+    return () => {
+      if (ref.current?.srcObject === stream) ref.current.srcObject = null;
+    };
+  }, [stream]);
+  return <video ref={ref} autoPlay playsInline muted={false} className="w-full h-full object-cover bg-black rounded-lg" />;
+};
+
 export default function RoomPage() {
   const params = useParams<{ roomName: string }>();
   const roomName = decodeURIComponent(params?.roomName ?? "general");
@@ -174,7 +187,8 @@ export default function RoomPage() {
 
     onPeerSignal: (fromId, fromPseudo, signal) => {
       const pseudoGuess = fromPseudo ?? clientsRef.current[fromId]?.pseudo ?? "Inconnu";
-      handleIncomingSignal(fromId, pseudoGuess, signal);
+      const videoEnabled = signal && typeof signal === "object" && "videoEnabled" in signal ? (signal as any).videoEnabled : false;
+      handleIncomingSignal(fromId, pseudoGuess, signal, videoEnabled);
     },
 
     onDisconnectedUser: (id, pseudo) => {
@@ -284,7 +298,7 @@ export default function RoomPage() {
   );
 
   const startCall = useCallback(
-    async (client: ChatClientInfo) => {
+    async (client: ChatClientInfo, videoEnabled: boolean = false) => {
       if (!client?.id) {
         setError("Impossible d'appeler: id manquant");
         return;
@@ -292,18 +306,22 @@ export default function RoomPage() {
       setError(null);
 
       await startPeerCall(client.id, client.pseudo, (signal) => {
-        emitPeerSignal(client.id, signal);
-      });
+        const payload: any = typeof signal === "object" && signal !== null ? { ...signal } : { signal };
+        payload.videoEnabled = videoEnabled;
+        emitPeerSignal(client.id, payload);
+      }, videoEnabled);
     },
     [emitPeerSignal, startPeerCall]
   );
 
   const acceptCall = useCallback(
-    async (fromId: string, fromPseudo: string) => {
+    async (fromId: string, fromPseudo: string, videoEnabled: boolean = false) => {
       setError(null);
       await acceptPeerCall(fromId, fromPseudo, (signal) => {
-        emitPeerSignal(fromId, signal);
-      });
+        const payload: any = typeof signal === "object" && signal !== null ? { ...signal } : { signal };
+        payload.videoEnabled = videoEnabled;
+        emitPeerSignal(fromId, payload);
+      }, videoEnabled);
     },
     [acceptPeerCall, emitPeerSignal]
   );
@@ -336,8 +354,10 @@ export default function RoomPage() {
 
   return (
     <div className="grid gap-4 p-4">
-      {/* Audio distant caché */}
-      {remoteStream && <RemoteAudio stream={remoteStream} />}
+      {/* Audio/Vidéo distant */}
+      {remoteStream && (
+        <RemoteAudio stream={remoteStream} />
+      )}
 
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -355,7 +375,7 @@ export default function RoomPage() {
             </Chip>
             {callState.phase !== "idle" && (
               <Chip size="sm" color={callState.phase === "active" ? "success" : "warning"} variant="flat">
-                Appel: {callState.phase}
+                Appel: {callState.phase} {(callState as any).videoEnabled ? "📹" : "☎️"}
               </Chip>
             )}
           </div>
@@ -453,7 +473,7 @@ export default function RoomPage() {
               <ModalHeader>Appel entrant</ModalHeader>
               <ModalBody>
                 <div className="text-sm">
-                  {incomingInfo?.pseudo} t'appelle.
+                  {incomingInfo?.pseudo} t'appelle{callState.phase === "incoming" && callState.videoEnabled ? " (vidéo)" : ""}.
                 </div>
               </ModalBody>
               <ModalFooter>
@@ -464,7 +484,8 @@ export default function RoomPage() {
                   color="success"
                   onPress={() => {
                     if (!incomingInfo) return;
-                    acceptCall(incomingInfo.id, incomingInfo.pseudo);
+                    const videoEnabled = callState.phase === "incoming" ? callState.videoEnabled : false;
+                    acceptCall(incomingInfo.id, incomingInfo.pseudo, videoEnabled);
                   }}
                 >
                   Répondre
@@ -508,15 +529,30 @@ export default function RoomPage() {
                         </div>
                       </div>
 
-                      <Button
-                        size="sm"
-                        color="primary"
-                        variant="flat"
-                        onPress={() => startCall(p)}
-                        isDisabled={callState.phase === "active" || callState.phase === "dialing"}
-                      >
-                        Appeler
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button
+                          isIconOnly
+                          size="sm"
+                          color="primary"
+                          variant="flat"
+                          onPress={() => startCall(p, false)}
+                          isDisabled={callState.phase === "active" || callState.phase === "dialing"}
+                          title="Appel audio"
+                        >
+                          ☎️
+                        </Button>
+                        <Button
+                          isIconOnly
+                          size="sm"
+                          color="primary"
+                          variant="flat"
+                          onPress={() => startCall(p, true)}
+                          isDisabled={callState.phase === "active" || callState.phase === "dialing"}
+                          title="Appel vidéo"
+                        >
+                          📷
+                        </Button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -559,6 +595,34 @@ export default function RoomPage() {
                     </CardBody>
                   </Card>
                 )}
+              </ModalBody>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
+      {/* Video Call Modal */}
+      <Modal 
+        isOpen={callState.phase === "active" && (callState as any).videoEnabled && !!remoteStream} 
+        onOpenChange={() => {}} 
+        size="2xl"
+        backdrop="blur"
+        classNames={{ backdrop: "bg-black/80" }}
+      >
+        <ModalContent>
+          {() => (
+            <>
+              <ModalHeader className="absolute top-2 left-2 z-50 bg-black/50 text-white rounded-lg px-3 py-2 flex items-center justify-between w-[calc(100%-16px)]">
+                <div>
+                  <div className="text-sm font-semibold">En appel vidéo avec {callState.phase === "active" ? callState.peerPseudo : ""}</div>
+                  <div className="text-xs opacity-70">Durée: {formatDuration(callDuration)}</div>
+                </div>
+                <Button color="danger" size="sm" onPress={stopCall}>
+                  Raccrocher
+                </Button>
+              </ModalHeader>
+              <ModalBody className="p-0 bg-black h-96">
+                {remoteStream && <RemoteVideo stream={remoteStream} />}
               </ModalBody>
             </>
           )}

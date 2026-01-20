@@ -69,17 +69,19 @@ export type ChatDisconnectedPayload = {
 };
 
 /**
- * Signal WebRTC reçu pour établir appel audio.
+ * Signal WebRTC reçu pour établir appel audio/vidéo.
  * @typedef {Object} PeerSignalPayload
  * @property {unknown} signal - Signalisation SDP/ICE
  * @property {string} id - ID du pair distant
  * @property {string} roomName - Salle de l'appel
+ * @property {boolean} [videoEnabled] - Si l'appel inclut la vidéo
  */
 export type PeerSignalPayload = {
   signal: unknown;
   id: string;
   roomName: string;
   pseudo: string;
+  videoEnabled?: boolean;
 };
 
 /** Alias pour symétrie avec client→server */

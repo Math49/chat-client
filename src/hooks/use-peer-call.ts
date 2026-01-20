@@ -5,9 +5,9 @@ import SimplePeer, { type Instance as SimplePeerInstance } from "simple-peer";
 
 export type CallState =
   | { phase: "idle" }
-  | { phase: "dialing"; targetId: string; targetPseudo: string; startedAt: number }
-  | { phase: "incoming"; fromId: string; fromPseudo: string }
-  | { phase: "active"; peerId: string; peerPseudo: string };
+  | { phase: "dialing"; targetId: string; targetPseudo: string; startedAt: number; videoEnabled: boolean }
+  | { phase: "incoming"; fromId: string; fromPseudo: string; videoEnabled: boolean }
+  | { phase: "active"; peerId: string; peerPseudo: string; videoEnabled: boolean };
 
 export interface UsePeerCallConfig {
   onCallStateChange?: (state: CallState) => void;
@@ -40,7 +40,7 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
 
   const peerRef = useRef<SimplePeerInstance | null>(null);
-  const peerMetaRef = useRef<{ id: string; pseudo: string; onSignal: SignalEmitter } | null>(null);
+  const peerMetaRef = useRef<{ id: string; pseudo: string; onSignal: SignalEmitter; videoEnabled: boolean } | null>(null);
 
   const localStreamRef = useRef<MediaStream | null>(null);
 
@@ -58,6 +58,21 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         video: false,
+      });
+      localStreamRef.current = stream;
+      return stream;
+    } catch (e) {
+      onErrorRef.current?.(e);
+      throw e;
+    }
+  }, []);
+
+  const ensureLocalStreamWithVideo = useCallback(async () => {
+    if (localStreamRef.current) return localStreamRef.current;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
       });
       localStreamRef.current = stream;
       return stream;
@@ -115,10 +130,10 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
   }, []);
 
   const createPeer = useCallback(
-    async (peerId: string, peerPseudo: string, initiator: boolean, onSignal: SignalEmitter) => {
+    async (peerId: string, peerPseudo: string, initiator: boolean, onSignal: SignalEmitter, videoEnabled: boolean = false) => {
       if (peerRef.current) return; // 1 appel à la fois
 
-      const localStream = await ensureLocalStream();
+      const localStream = videoEnabled ? await ensureLocalStreamWithVideo() : await ensureLocalStream();
 
       const peer = new SimplePeer({
         initiator,
@@ -128,7 +143,7 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
       });
 
       peerRef.current = peer;
-      peerMetaRef.current = { id: peerId, pseudo: peerPseudo, onSignal };
+      peerMetaRef.current = { id: peerId, pseudo: peerPseudo, onSignal, videoEnabled };
 
       peer.on("signal", (signal) => {
         // signal = offer / answer / candidate (selon trickle)
@@ -142,7 +157,7 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
       peer.on("stream", (_remoteStream) => {
         // En audio-only, "stream" arrive quand la connexion est ok
         setRemoteStream(_remoteStream);
-        setStateSafe({ phase: "active", peerId, peerPseudo });
+        setStateSafe({ phase: "active", peerId, peerPseudo, videoEnabled });
       });
 
       peer.on("close", () => {
@@ -157,30 +172,30 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
       // Si on a déjà reçu offer/candidates en avance
       flushPendingSignals(peerId);
     },
-    [destroyPeer, ensureLocalStream, flushPendingSignals, setStateSafe]
+    [destroyPeer, ensureLocalStream, ensureLocalStreamWithVideo, flushPendingSignals, setStateSafe]
   );
 
   const startCall = useCallback(
-    async (targetId: string, targetPseudo: string, onSignal: SignalEmitter) => {
+    async (targetId: string, targetPseudo: string, onSignal: SignalEmitter, videoEnabled: boolean = false) => {
       if (peerRef.current) {
         onErrorRef.current?.("Un appel est déjà en cours");
         return;
       }
 
-      setStateSafe({ phase: "dialing", targetId, targetPseudo, startedAt: Date.now() });
-      await createPeer(targetId, targetPseudo, true, onSignal);
+      setStateSafe({ phase: "dialing", targetId, targetPseudo, startedAt: Date.now(), videoEnabled });
+      await createPeer(targetId, targetPseudo, true, onSignal, videoEnabled);
     },
     [createPeer, setStateSafe]
   );
 
   const acceptCall = useCallback(
-    async (fromId: string, fromPseudo: string, onSignal: SignalEmitter) => {
+    async (fromId: string, fromPseudo: string, onSignal: SignalEmitter, videoEnabled: boolean = false) => {
       if (peerRef.current) {
         onErrorRef.current?.("Un appel est déjà en cours");
         return;
       }
-      // On garde incoming jusqu’à ce que "stream" arrive => passe active
-      await createPeer(fromId, fromPseudo, false, onSignal);
+      // On garde incoming jusqu'à ce que "stream" arrive => passe active
+      await createPeer(fromId, fromPseudo, false, onSignal, videoEnabled);
       flushPendingSignals(fromId);
     },
     [createPeer, flushPendingSignals]
@@ -195,7 +210,7 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
   );
 
   const handleIncomingSignal = useCallback(
-    (fromId: string, fromPseudo: string, signal: unknown) => {
+    (fromId: string, fromPseudo: string, signal: unknown, videoEnabled: boolean = false) => {
       // Gestion des signaux de contrôle attendus
       if (isControlSignal(signal)) {
         if (signal.type === "reject") {
@@ -231,7 +246,7 @@ export function usePeerCall(config: UsePeerCallConfig = {}) {
 
       // Passe en incoming si nécessaire
       if (callState.phase !== "incoming" || callState.fromId !== fromId) {
-        setStateSafe({ phase: "incoming", fromId, fromPseudo });
+        setStateSafe({ phase: "incoming", fromId, fromPseudo, videoEnabled: false });
       }
     },
     [callState, destroyPeer, setStateSafe]

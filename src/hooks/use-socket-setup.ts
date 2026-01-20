@@ -164,10 +164,7 @@ export function useSocketSetup(config: SocketSetupConfig) {
       socket.off("error", handleError);
       socket.off("erreur", handleError);
 
-      // Essayer de fermer proprement la socket
-      if (socket.connected) {
-        socket.emit("disconnect");
-      }
+      // Fermer proprement la socket
       socket.disconnect();
       socketRef.current = null;
 
@@ -194,12 +191,19 @@ export function useSocketSetup(config: SocketSetupConfig) {
       const s = socketRef.current;
       if (!s) return;
 
-      s.emit("peer-signal", {
+      const payload: any = {
         roomName,
         id: targetId,
-        signal,
+        signal: signal && typeof signal === "object" && "signal" in signal ? (signal as any).signal : signal,
         pseudo,
-      });
+      };
+
+      // Extraire videoEnabled si présent dans le signal
+      if (signal && typeof signal === "object" && "videoEnabled" in signal) {
+        payload.videoEnabled = (signal as any).videoEnabled;
+      }
+
+      s.emit("peer-signal", payload);
     },
     [roomName, pseudo]
   );
