@@ -91,11 +91,13 @@ export type PeerSignalEmitPayload = PeerSignalPayload;
  * @property {string} pseudo - Pseudonyme du client
  * @property {string} roomName - Salle à rejoindre
  * @property {string|null} [avatar] - Data URL avatar
+ * @property {string} [clientId] - ID unique persistant pour identifier les reconnexions
  */
 export type ChatJoinRoomPayload = {
   pseudo: string;
   roomName: string;
   avatar?: string | null;
+  clientId?: string;
 };
 
 /**

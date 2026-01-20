@@ -116,6 +116,7 @@ export default function RoomPage() {
     roomName,
     pseudo: profile?.pseudo ?? "",
     avatar: profile?.avatar ?? null,
+    clientId: profile?.clientId,
 
     onError: (message) => {
       console.error("[Socket]", message);

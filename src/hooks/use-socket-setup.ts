@@ -13,8 +13,7 @@ export type SocketStatus = "idle" | "connecting" | "connected" | "error";
 export type SocketSetupConfig = {
   roomName: string;
   pseudo: string;
-  avatar?: string | null;
-
+  avatar?: string | null;  clientId?: string;
   onConnect?: () => void;
   onDisconnect?: () => void;
   onError?: (message: string) => void;
@@ -29,7 +28,7 @@ export type SocketSetupConfig = {
 };
 
 export function useSocketSetup(config: SocketSetupConfig) {
-  const { roomName, pseudo, avatar } = config;
+  const { roomName, pseudo, avatar, clientId } = config;
 
   const socketRef = useRef<ChatSocket | null>(null);
 
@@ -94,6 +93,7 @@ export function useSocketSetup(config: SocketSetupConfig) {
         pseudo,
         roomName,
         avatar: avatar ?? null,
+        clientId,
       });
 
       cbRef.current.onConnect?.();
@@ -164,6 +164,10 @@ export function useSocketSetup(config: SocketSetupConfig) {
       socket.off("error", handleError);
       socket.off("erreur", handleError);
 
+      // Essayer de fermer proprement la socket
+      if (socket.connected) {
+        socket.emit("disconnect");
+      }
       socket.disconnect();
       socketRef.current = null;
 
@@ -171,7 +175,7 @@ export function useSocketSetup(config: SocketSetupConfig) {
       setSocketId(null);
       setStatusSafe("idle");
     };
-  }, [roomName, pseudo, avatar, setStatusSafe]);
+  }, [roomName, pseudo, avatar, clientId, setStatusSafe]);
 
   const emitMessage = useCallback(
     (content: string) => {

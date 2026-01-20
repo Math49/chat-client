@@ -24,11 +24,13 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
  * @property {string} pseudo - Pseudonyme (required)
  * @property {string} [avatar] - URL avatar optionnel
  * @property {string} [phone] - Numéro téléphone optionnel
+ * @property {string} [clientId] - ID unique persistant pour identifier les reconnexions
  */
 export type UserProfile = {
   pseudo: string;
   avatar?: string | null;
   phone?: string | null;
+  clientId?: string;
 };
 
 // ===== CONSTANTS =====
@@ -41,7 +43,17 @@ const defaultProfile: UserProfile = {
   pseudo: "",
   avatar: null,
   phone: null,
+  clientId: undefined,
 };
+
+/**
+ * Génère un UUID unique pour identifier le client.
+ * Utilisé pour distinguer les reconnexions et nettoyer les anciennes sessions.
+ */
+const generateClientId = (): string =>
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 // ===== CONTEXT TYPE =====
 
@@ -70,6 +82,7 @@ const UserContext = createContext<UserContextValue | undefined>(undefined);
 /**
  * Récupère le profil depuis localStorage.
  * Valide le schéma JSON avant retour.
+ * Génère un clientId s'il n'existe pas.
  * 
  * @returns {UserProfile|null} Profil parsé ou null si absent/invalide
  */
@@ -83,10 +96,12 @@ const readProfileFromStorage = (): UserProfile | null => {
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.pseudo === "string") {
       // Normalise types (pseudo string, avatar/phone nullable)
+      // Génère un clientId si absent (pour anciennes données)
       return {
         pseudo: parsed.pseudo,
         avatar: typeof parsed.avatar === "string" ? parsed.avatar : null,
         phone: typeof parsed.phone === "string" ? parsed.phone : null,
+        clientId: parsed.clientId ?? generateClientId(),
       } satisfies UserProfile;
     }
   } catch (error) {
@@ -160,6 +175,7 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
       pseudo: next.pseudo.trim(),
       avatar: next.avatar ?? null,
       phone: next.phone ?? null,
+      clientId: next.clientId ?? generateClientId(),
     };
     setProfile(normalized);
     writeProfileToStorage(normalized);
@@ -169,6 +185,7 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
   /**
    * Met à jour le profil avec des champs partiels.
    * Merge avec profil courant, rejette si pseudo vide.
+   * Préserve le clientId existant.
    * 
    * @param {Partial<UserProfile>} value - Champs à updater
    */
@@ -182,6 +199,7 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
         pseudo: (value.pseudo ?? base.pseudo).trim(),
         avatar: value.avatar === undefined ? base.avatar ?? null : value.avatar,
         phone: value.phone === undefined ? base.phone ?? null : value.phone,
+        clientId: value.clientId ?? base.clientId ?? generateClientId(),
       };
       
       // Validation: pseudo obligatoire
