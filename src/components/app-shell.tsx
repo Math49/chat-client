@@ -19,7 +19,6 @@ import Link from "next/link";
 import { HeroUIProvider } from "@heroui/react";
 
 import BatteryIndicator from "@/components/battery-indicator";
-import GeolocationIndicator from "@/components/geolocation-indicator";
 import { UserProvider } from "@/contexts/user-context";
 
 /**
@@ -64,11 +63,8 @@ export function AppShell({ children }: PropsWithChildren) {
             </Link>
           </nav>
           
-          {/* Indicateurs device */}
-          <div className="flex items-center gap-2">
-            <GeolocationIndicator />
-            <BatteryIndicator />
-          </div>
+          {/* Indicateur batterie device */}
+          <BatteryIndicator />
         </header>
         
         {/* Contenu principal avec max-width */}

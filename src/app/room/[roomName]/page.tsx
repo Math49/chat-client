@@ -13,6 +13,11 @@ import {
   Chip,
   Divider,
   Input,
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
   ScrollShadow,
   Dropdown,
   DropdownTrigger,
@@ -22,16 +27,13 @@ import {
 
 import { useUser } from "@/contexts/user-context";
 import { useSocketSetup } from "@/hooks/use-socket-setup";
-import { useConference } from "@/hooks/use-conference";
+import { usePeerCall } from "@/hooks/use-peer-call";
 
 import { rememberRoom } from "@/lib/rooms";
 import { savePhoto } from "@/lib/photo-storage";
 import { loadRoomMessages, addRoomMessage } from "@/lib/message-storage";
 import { showNotification } from "@/lib/notifications";
-import { type ChatClientInfo, type ChatMessage, type ConferenceStartPayload } from "@/lib/socket-client";
-
-import { ConferenceMessage } from "@/components/conference-message";
-import { ConferenceStatusIndicator, ParticipantWithConferenceStatus } from "@/components/conference-status";
+import { type ChatClientInfo, type ChatMessage } from "@/lib/socket-client";
 
 const IMAGE_DATA_PREFIX = /^data:image\//i;
 
@@ -45,15 +47,12 @@ const toDataUrl = (file: File): Promise<string> =>
 
 type ChatEntry = {
   id: string;
-  type: "message" | "info" | "conference-start";
+  type: "message" | "info";
   pseudo: string;
   content: string;
   date: Date;
   isMine: boolean;
   isImage: boolean;
-  // Pour les messages de conférence
-  conferenceId?: string;
-  initiatorId?: string;
 };
 
 const RemoteAudio = ({ stream }: { stream: MediaStream }) => {
@@ -79,12 +78,8 @@ export default function RoomPage() {
   const [messages, setMessages] = useState<ChatEntry[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
 
-  // État de la conférence
-  const [activeConferenceId, setActiveConferenceId] = useState<string | null>(null);
-  const [conferenceParticipants, setConferenceParticipants] = useState<Set<string>>(new Set());
-  const [isJoiningConference, setIsJoiningConference] = useState(false);
+  const [search, setSearch] = useState("");
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const clientsRef = useRef<Record<string, ChatClientInfo>>({});
@@ -104,29 +99,20 @@ export default function RoomPage() {
       : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   const {
-    conferenceState,
-    startConference,
-    joinConference,
-    leaveConference,
-    handleIncomingSignal: handleConferenceSignal,
-    addParticipant: addConferenceParticipant,
-    removeParticipant: removeConferenceParticipant,
-    getPeers: getConferencePeers,
-  } = useConference({
+    callState,
+    startCall: startPeerCall,
+    acceptCall: acceptPeerCall,
+    rejectCall: rejectPeerCall,
+    handleIncomingSignal,
+    hangup,
+  } = usePeerCall({
     onError: (e) => {
-      console.error("[Conference]", e);
-      setError(typeof e === "string" ? e : "Erreur conférence audio");
-    },
-    onStreamAvailable: (peerId, stream) => {
-      console.log(`[Conference] Stream reçu de ${peerId}`);
-      // On pourrait afficher le stream si on avait une interface audio avancée
-    },
-    onStreamRemoved: (peerId) => {
-      console.log(`[Conference] Stream retiré de ${peerId}`);
+      console.error("[PeerCall]", e);
+      setError(typeof e === "string" ? e : "Erreur appel audio");
     },
   });
 
-  const { status: socketStatus, clients, socketId, emitMessage, emitConferenceStart, emitConferenceJoin, emitConferenceLeave, emitConferencePeerSignal } = useSocketSetup({
+  const { status: socketStatus, clients, socketId, emitMessage, emitPeerSignal } = useSocketSetup({
     roomName,
     pseudo: profile?.pseudo ?? "",
     avatar: profile?.avatar ?? null,
@@ -185,58 +171,10 @@ export default function RoomPage() {
       }
     },
 
-    // 🎤 Gestion des événements de conférence
-    onConferenceStarted: (payload: ConferenceStartPayload) => {
-      setActiveConferenceId(payload.conferenceId);
-      setConferenceParticipants(new Set([payload.initiatorId]));
-
-      // Ajouter un message système à la conférence
-      appendMessage({
-        id: makeId(),
-        type: "conference-start",
-        pseudo: payload.initiatorPseudo,
-        content: `a lancé une conférence`,
-        date: new Date(),
-        isMine: false,
-        isImage: false,
-        conferenceId: payload.conferenceId,
-        initiatorId: payload.initiatorId,
-      });
-    },
-
-    onConferenceUserJoined: (payload) => {
-      setConferenceParticipants((prev) => new Set([...prev, payload.userId]));
-      appendMessage({
-        id: makeId(),
-        type: "info",
-        pseudo: payload.userPseudo,
-        content: `a rejoint la conférence`,
-        date: new Date(),
-        isMine: false,
-        isImage: false,
-      });
-    },
-
-    onConferenceUserLeft: (payload) => {
-      setConferenceParticipants((prev) => {
-        const next = new Set(prev);
-        next.delete(payload.userId);
-        return next;
-      });
-      appendMessage({
-        id: makeId(),
-        type: "info",
-        pseudo: payload.userPseudo,
-        content: `a quitté la conférence`,
-        date: new Date(),
-        isMine: false,
-        isImage: false,
-      });
-    },
-
-    onConferencePeerSignal: (payload) => {
-      if (conferenceState.phase !== "active") return;
-      handleConferenceSignal(payload.fromId, payload.fromPseudo, payload.signal, false);
+    // ✅ Signaux entrants (offer/answer/candidate/reject/hangup)
+    onPeerSignal: (fromId, fromPseudo, signal) => {
+      const pseudoGuess = fromPseudo ?? clientsRef.current[fromId]?.pseudo ?? "Inconnu";
+      handleIncomingSignal(fromId, pseudoGuess, signal);
     },
 
     onDisconnectedUser: (id, pseudo) => {
@@ -250,9 +188,9 @@ export default function RoomPage() {
         isImage: false,
       });
 
-      // Si on est en conférence et que cette personne quitte, la retirer
-      if (activeConferenceId) {
-        removeConferenceParticipant(id);
+      if (callState.phase === "active" && callState.peerId === id) {
+        // l'autre est parti => on raccroche localement
+        hangup();
       }
     },
   });
@@ -284,11 +222,11 @@ export default function RoomPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
-  // Participants filtrés (excluant soi-même)
+  // ✅ participants avec id injecté (Object.entries)
   const participants = useMemo(() => {
     const list = Object.entries(clients)
       .filter(([id]) => id !== socketId)
-      .map(([id, c]) => ({ ...c, id } as ChatClientInfo & { id: string }))
+      .map(([id, c]) => ({ ...c, id } as ChatClientInfo))
       .sort((a, b) => a.pseudo.localeCompare(b.pseudo));
 
     const q = search.trim().toLowerCase();
@@ -334,77 +272,56 @@ export default function RoomPage() {
     [doSendMessage]
   );
 
-  // 🎤 Démarrer une conférence
-  const handleStartConference = useCallback(async () => {
-    if (!socketId) return;
-    try {
-      setIsJoiningConference(true);
-      const conferenceId = await startConference((peerId, signal) => {
-        if (activeConferenceId) {
-          emitConferencePeerSignal({
-            conferenceId: activeConferenceId,
-            signal,
-            fromId: socketId,
-            fromPseudo: profile?.pseudo ?? "Inconnu",
-            roomName,
-          });
-        }
-      });
-      setActiveConferenceId(conferenceId);
-      setConferenceParticipants(new Set([socketId]));
-      emitConferenceStart(conferenceId);
-      setIsJoiningConference(false);
-    } catch (e) {
-      setError(typeof e === "string" ? e : "Erreur lors du démarrage de la conférence");
-      setIsJoiningConference(false);
-    }
-  }, [socketId, startConference, activeConferenceId, emitConferencePeerSignal, profile?.pseudo, roomName, emitConferenceStart]);
-
-  // 🎤 Rejoindre une conférence existante
-  const handleJoinConference = useCallback(
-    async (conferenceId: string) => {
-      if (!socketId) return;
-      try {
-        setIsJoiningConference(true);
-        await joinConference(conferenceId, (peerId, signal) => {
-          emitConferencePeerSignal({
-            conferenceId,
-            signal,
-            fromId: socketId,
-            fromPseudo: profile?.pseudo ?? "Inconnu",
-            roomName,
-          });
-        });
-        setActiveConferenceId(conferenceId);
-        setConferenceParticipants((prev) => new Set([...prev, socketId]));
-        emitConferenceJoin(conferenceId);
-        setIsJoiningConference(false);
-      } catch (e) {
-        setError(typeof e === "string" ? e : "Erreur lors de la connexion à la conférence");
-        setIsJoiningConference(false);
+  // ✅ Call actions alignées sur ton "CallManager"
+  const startCall = useCallback(
+    async (client: ChatClientInfo) => {
+      if (!client?.id) {
+        setError("Impossible d'appeler: id manquant");
+        return;
       }
+      setError(null);
+
+      await startPeerCall(client.id, client.pseudo, (signal) => {
+        emitPeerSignal(client.id, signal); // OFFER + CANDIDATE + …
+      });
     },
-    [socketId, joinConference, emitConferencePeerSignal, profile?.pseudo, roomName, emitConferenceJoin]
+    [emitPeerSignal, startPeerCall]
   );
 
-  // 🎤 Quitter la conférence
-  const handleLeaveConference = useCallback(
-    (conferenceId: string) => {
-      leaveConference();
-      setActiveConferenceId(null);
-      setConferenceParticipants(new Set());
-      emitConferenceLeave(conferenceId);
+  const acceptCall = useCallback(
+    async (fromId: string, fromPseudo: string) => {
+      setError(null);
+      await acceptPeerCall(fromId, fromPseudo, (signal) => {
+        emitPeerSignal(fromId, signal); // ANSWER + CANDIDATE
+      });
     },
-    [leaveConference, emitConferenceLeave]
+    [acceptPeerCall, emitPeerSignal]
   );
+
+  const rejectCall = useCallback(() => {
+    if (callState.phase !== "incoming") return;
+    // ✅ on envoie REJECT au caller
+    emitPeerSignal(callState.fromId, { type: "reject" });
+    rejectPeerCall(callState.fromId);
+  }, [callState, emitPeerSignal, rejectPeerCall]);
+
+  const stopCall = useCallback(() => {
+    // ✅ on envoie HANGUP à l’autre, quel que soit dialing/active
+    if (callState.phase === "active") {
+      emitPeerSignal(callState.peerId, { type: "hangup" });
+    }
+    if (callState.phase === "dialing") {
+      emitPeerSignal(callState.targetId, { type: "hangup" });
+    }
+    hangup();
+  }, [callState, emitPeerSignal, hangup]);
 
   if (!profile?.pseudo) return null;
 
+  const incomingInfo = callState.phase === "incoming" ? { id: callState.fromId, pseudo: callState.fromPseudo } : null;
+
   return (
     <div className="grid gap-4 p-4">
-      {/* Composant audio distant caché */}
-      {getConferencePeers().map((peer) => peer.stream && <RemoteAudio key={peer.id} stream={peer.stream} />)}
-
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -419,10 +336,11 @@ export default function RoomPage() {
                     ? "Erreur"
                     : "Déconnecté"}
             </Chip>
-            <ConferenceStatusIndicator
-              isActive={activeConferenceId !== null}
-              participantCount={conferenceParticipants.size}
-            />
+            {callState.phase !== "idle" && (
+              <Chip size="sm" color={callState.phase === "active" ? "success" : "warning"} variant="flat">
+                Appel: {callState.phase}
+              </Chip>
+            )}
           </div>
         </div>
 
@@ -438,7 +356,9 @@ export default function RoomPage() {
 
       {error && (
         <Card>
-          <CardBody className="text-sm text-danger">{error}</CardBody>
+          <CardBody className="text-sm text-danger">
+            {error}
+          </CardBody>
         </Card>
       )}
 
@@ -453,46 +373,30 @@ export default function RoomPage() {
           <CardBody className="flex h-full flex-col gap-3">
             <ScrollShadow className="flex-1 pr-2">
               <div className="space-y-3 max-h-[400px] overflow-y-auto px-1">
-                {messages.map((m) => {
-                  if (m.type === "conference-start") {
-                    return (
-                      <ConferenceMessage
-                        key={m.id}
-                        conferenceId={m.conferenceId!}
-                        initiatorPseudo={m.pseudo}
-                        isCurrentUserInConference={activeConferenceId === m.conferenceId}
-                        onJoinConference={handleJoinConference}
-                        onLeaveConference={handleLeaveConference}
-                        isConnecting={isJoiningConference}
-                      />
-                    );
-                  }
-
-                  return (
-                    <div
-                      key={m.id}
-                      className={`rounded-2xl p-3 text-sm ${
-                        m.type === "info"
-                          ? "bg-default-100 text-default-600"
-                          : m.isMine
-                            ? "bg-primary-50 text-primary-900"
-                            : "bg-content2"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between text-xs opacity-70">
-                        <span className="font-semibold">{m.pseudo}</span>
-                        <span>{m.date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-                      </div>
-                      <div className="mt-2">
-                        {m.isImage ? (
-                          <img src={m.content} alt="Photo partagee" className="max-h-72 rounded-xl object-contain" />
-                        ) : (
-                          <p className="leading-relaxed">{m.content}</p>
-                        )}
-                      </div>
+                {messages.map((m) => (
+                  <div
+                    key={m.id}
+                    className={`rounded-2xl p-3 text-sm ${
+                      m.type === "info"
+                        ? "bg-default-100 text-default-600"
+                        : m.isMine
+                          ? "bg-primary-50 text-primary-900"
+                          : "bg-content2"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-xs opacity-70">
+                      <span className="font-semibold">{m.pseudo}</span>
+                      <span>{m.date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                     </div>
-                  );
-                })}
+                    <div className="mt-2">
+                      {m.isImage ? (
+                        <img src={m.content} alt="Photo partagee" className="max-h-72 rounded-xl object-contain" />
+                      ) : (
+                        <p className="leading-relaxed">{m.content}</p>
+                      )}
+                    </div>
+                  </div>
+                ))}
                 <div ref={messagesEndRef} />
               </div>
             </ScrollShadow>
@@ -522,59 +426,13 @@ export default function RoomPage() {
           </CardBody>
         </Card>
 
-        {/* Side: Participants + Conference Controls */}
+        {/* Side: Participants + Call */}
         <div className="space-y-4">
-          {/* Conférence */}
-          <Card>
-            <CardHeader className="flex items-center justify-between">
-              <div className="font-semibold">Conférence</div>
-              {activeConferenceId && (
-                <Chip size="sm" color="danger" variant="flat">
-                  Actif
-                </Chip>
-              )}
-            </CardHeader>
-            <Divider />
-            <CardBody className="space-y-3">
-              {!activeConferenceId ? (
-                <>
-                  <p className="text-sm opacity-70">Aucune conférence en cours</p>
-                  <Button
-                    color="primary"
-                    onPress={handleStartConference}
-                    isDisabled={!socketId || isJoiningConference}
-                    isLoading={isJoiningConference}
-                    fullWidth
-                  >
-                    Lancer une conférence
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <p className="text-sm font-medium">
-                    {conferenceParticipants.size} participant{conferenceParticipants.size > 1 ? "s" : ""}
-                  </p>
-                  <Button
-                    color="danger"
-                    variant="flat"
-                    onPress={() => handleLeaveConference(activeConferenceId)}
-                    isDisabled={isJoiningConference}
-                    fullWidth
-                  >
-                    Quitter
-                  </Button>
-                </>
-              )}
-            </CardBody>
-          </Card>
-
           {/* Participants */}
           <Card>
             <CardHeader className="flex items-center justify-between">
               <div className="font-semibold">Participants</div>
-              <Chip size="sm" variant="flat">
-                {participants.length}
-              </Chip>
+              <Chip size="sm" variant="flat">{participants.length}</Chip>
             </CardHeader>
             <Divider />
             <CardBody className="space-y-3">
@@ -598,25 +456,116 @@ export default function RoomPage() {
                       className="flex items-center justify-between gap-2 rounded-2xl bg-content2 px-3 py-2"
                     >
                       <div className="flex items-center gap-3">
-                        <ParticipantWithConferenceStatus
-                          pseudo={p.pseudo}
-                          avatar={p.avatar}
-                          isInConference={conferenceParticipants.has(p.id)}
-                          conferenceParticipantCount={conferenceParticipants.size}
-                        />
+                        <Avatar name={p.pseudo} size="sm" />
                         <div className="min-w-0">
                           <div className="truncate text-sm font-semibold">{p.pseudo}</div>
                           <div className="text-xs opacity-60">En ligne</div>
                         </div>
                       </div>
+
+                      <Dropdown>
+                        <DropdownTrigger>
+                          <Button size="sm" variant="flat">
+                            Actions
+                          </Button>
+                        </DropdownTrigger>
+                        <DropdownMenu aria-label="participant-actions">
+                          <DropdownItem
+                            key="call"
+                            onPress={() => startCall(p)}
+                            isDisabled={callState.phase === "active" || callState.phase === "dialing"}
+                          >
+                            Appeler (audio)
+                          </DropdownItem>
+                          <DropdownItem
+                            key="tel"
+                            as="a"
+                            href="tel:+33600000000"
+                            description="Exemple — remplace par un numéro réel si tu en as"
+                          >
+                            Appel téléphone (tel:)
+                          </DropdownItem>
+                        </DropdownMenu>
+                      </Dropdown>
                     </div>
                   ))}
                 </div>
               </ScrollShadow>
             </CardBody>
           </Card>
+
+          {/* Call Status */}
+          <Card>
+            <CardHeader className="flex items-center justify-between">
+              <div className="font-semibold">Appel</div>
+              <Chip size="sm" color={callState.phase === "active" ? "success" : callState.phase === "idle" ? "default" : "warning"} variant="flat">
+                {callState.phase}
+              </Chip>
+            </CardHeader>
+            <Divider />
+            <CardBody className="space-y-3">
+              {callState.phase === "idle" && (
+                <div className="text-sm opacity-70">
+                  Lance un appel depuis la liste des participants.
+                </div>
+              )}
+
+              {callState.phase === "dialing" && (
+                <div className="flex items-center justify-between">
+                  <div className="text-sm">
+                    Appel vers <span className="font-semibold">{callState.targetPseudo}</span>
+                  </div>
+                  <Button color="danger" variant="flat" onPress={stopCall}>
+                    Annuler
+                  </Button>
+                </div>
+              )}
+
+              {callState.phase === "active" && (
+                <div className="flex items-center justify-between">
+                  <div className="text-sm">
+                    En ligne avec <span className="font-semibold">{callState.peerPseudo}</span>
+                  </div>
+                  <Button color="danger" onPress={stopCall}>
+                    Raccrocher
+                  </Button>
+                </div>
+              )}
+            </CardBody>
+          </Card>
         </div>
       </section>
+
+      {/* Incoming call modal */}
+      <Modal isOpen={callState.phase === "incoming"} onOpenChange={() => {}}>
+        <ModalContent>
+          {() => (
+            <>
+              <ModalHeader>Appel entrant</ModalHeader>
+              <ModalBody>
+                <div className="text-sm">
+                  {incomingInfo?.pseudo} t’appelle.
+                </div>
+              </ModalBody>
+              <ModalFooter>
+                <Button color="danger" variant="flat" onPress={rejectCall}>
+                  Refuser
+                </Button>
+                <Button
+                  color="success"
+                  onPress={() => {
+                    if (!incomingInfo) return;
+                    acceptCall(incomingInfo.id, incomingInfo.pseudo);
+                  }}
+                >
+                  Répondre
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
     </div>
   );
 }

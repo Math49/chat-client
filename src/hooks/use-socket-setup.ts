@@ -6,10 +6,6 @@ import {
   type ChatSocket,
   type ChatClientInfo,
   type ChatMessage,
-  type ConferenceStartPayload,
-  type ConferenceJoinPayload,
-  type ConferenceLeavePayload,
-  type ConferencePeerSignalPayload,
 } from "@/lib/socket-client";
 
 export type SocketStatus = "idle" | "connecting" | "connected" | "error";
@@ -26,14 +22,8 @@ export type SocketSetupConfig = {
   onJoinedRoom?: (clients: Record<string, ChatClientInfo>) => void;
   onDisconnectedUser?: (id: string, pseudo?: string) => void;
 
-  // ✅ On passe aussi le pseudo de l'émetteur
+  // ✅ On passe aussi le pseudo de l’émetteur
   onPeerSignal?: (fromId: string, fromPseudo: string | undefined, signal: unknown) => void;
-
-  // 🎤 Conférence
-  onConferenceStarted?: (payload: ConferenceStartPayload) => void;
-  onConferenceUserJoined?: (payload: ConferenceJoinPayload) => void;
-  onConferenceUserLeft?: (payload: ConferenceLeavePayload) => void;
-  onConferencePeerSignal?: (payload: ConferencePeerSignalPayload) => void;
 
   onStatusChange?: (status: SocketStatus) => void;
 };
@@ -55,10 +45,6 @@ export function useSocketSetup(config: SocketSetupConfig) {
     onJoinedRoom: config.onJoinedRoom,
     onDisconnectedUser: config.onDisconnectedUser,
     onPeerSignal: config.onPeerSignal,
-    onConferenceStarted: config.onConferenceStarted,
-    onConferenceUserJoined: config.onConferenceUserJoined,
-    onConferenceUserLeft: config.onConferenceUserLeft,
-    onConferencePeerSignal: config.onConferencePeerSignal,
     onStatusChange: config.onStatusChange,
   });
 
@@ -71,10 +57,6 @@ export function useSocketSetup(config: SocketSetupConfig) {
       onJoinedRoom: config.onJoinedRoom,
       onDisconnectedUser: config.onDisconnectedUser,
       onPeerSignal: config.onPeerSignal,
-      onConferenceStarted: config.onConferenceStarted,
-      onConferenceUserJoined: config.onConferenceUserJoined,
-      onConferenceUserLeft: config.onConferenceUserLeft,
-      onConferencePeerSignal: config.onConferencePeerSignal,
       onStatusChange: config.onStatusChange,
     };
   }, [
@@ -85,10 +67,6 @@ export function useSocketSetup(config: SocketSetupConfig) {
     config.onJoinedRoom,
     config.onDisconnectedUser,
     config.onPeerSignal,
-    config.onConferenceStarted,
-    config.onConferenceUserJoined,
-    config.onConferenceUserLeft,
-    config.onConferencePeerSignal,
     config.onStatusChange,
   ]);
 
@@ -164,33 +142,12 @@ export function useSocketSetup(config: SocketSetupConfig) {
       cbRef.current.onPeerSignal?.(fromId, fromPseudo, signal);
     };
 
-    // 🎤 Conférence
-    const handleConferenceStarted = (payload: ConferenceStartPayload) => {
-      cbRef.current.onConferenceStarted?.(payload);
-    };
-
-    const handleConferenceUserJoined = (payload: ConferenceJoinPayload) => {
-      cbRef.current.onConferenceUserJoined?.(payload);
-    };
-
-    const handleConferenceUserLeft = (payload: ConferenceLeavePayload) => {
-      cbRef.current.onConferenceUserLeft?.(payload);
-    };
-
-    const handleConferencePeerSignal = (payload: ConferencePeerSignalPayload) => {
-      cbRef.current.onConferencePeerSignal?.(payload);
-    };
-
     socket.on("connect", handleConnect);
     socket.on("disconnect", handleDisconnect);
     socket.on("chat-msg", handleChatMessage);
     socket.on("chat-joined-room", handleJoinedRoom);
     socket.on("chat-disconnected", handleDisconnectedUser);
     socket.on("peer-signal", handlePeerSignal);
-    socket.on("conference-started", handleConferenceStarted);
-    socket.on("conference-user-joined", handleConferenceUserJoined);
-    socket.on("conference-user-left", handleConferenceUserLeft);
-    socket.on("conference-peer-signal", handleConferencePeerSignal);
 
     socket.on("error", handleError);
     socket.on("erreur", handleError);
@@ -204,10 +161,6 @@ export function useSocketSetup(config: SocketSetupConfig) {
       socket.off("chat-joined-room", handleJoinedRoom);
       socket.off("chat-disconnected", handleDisconnectedUser);
       socket.off("peer-signal", handlePeerSignal);
-      socket.off("conference-started", handleConferenceStarted);
-      socket.off("conference-user-joined", handleConferenceUserJoined);
-      socket.off("conference-user-left", handleConferenceUserLeft);
-      socket.off("conference-peer-signal", handleConferencePeerSignal);
       socket.off("error", handleError);
       socket.off("erreur", handleError);
 
@@ -247,42 +200,6 @@ export function useSocketSetup(config: SocketSetupConfig) {
     [roomName, pseudo]
   );
 
-  const emitConferenceStart = useCallback(
-    (conferenceId: string) => {
-      const s = socketRef.current;
-      if (!s) return;
-      s.emit("conference-start", { conferenceId, roomName });
-    },
-    [roomName]
-  );
-
-  const emitConferenceJoin = useCallback(
-    (conferenceId: string) => {
-      const s = socketRef.current;
-      if (!s) return;
-      s.emit("conference-join", { conferenceId, roomName });
-    },
-    [roomName]
-  );
-
-  const emitConferenceLeave = useCallback(
-    (conferenceId: string) => {
-      const s = socketRef.current;
-      if (!s) return;
-      s.emit("conference-leave", { conferenceId, roomName });
-    },
-    [roomName]
-  );
-
-  const emitConferencePeerSignal = useCallback(
-    (payload: ConferencePeerSignalPayload) => {
-      const s = socketRef.current;
-      if (!s) return;
-      s.emit("conference-peer-signal", payload);
-    },
-    []
-  );
-
   const participants = useMemo(() => Object.values(clients), [clients]);
 
   return {
@@ -292,9 +209,5 @@ export function useSocketSetup(config: SocketSetupConfig) {
     participants,
     emitMessage,
     emitPeerSignal,
-    emitConferenceStart,
-    emitConferenceJoin,
-    emitConferenceLeave,
-    emitConferencePeerSignal,
   };
 }
