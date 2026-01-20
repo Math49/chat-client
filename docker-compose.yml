@@ -1,0 +1,7 @@
+services:
+  php:
+    container_name: chat-client
+    image: ghcr.io/math49/chat-client:latest
+    ports:
+      - "127.0.0.1:8500:8000"
+    restart: unless-stopped
