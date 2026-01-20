@@ -2,6 +2,6 @@ services:
   chat-client:
     container_name: chat-client
     image: ghcr.io/math49/chat-client:latest
-    ports:
-      - "127.0.0.1:40200:8000"
+    network_mode: host
     restart: unless-stopped
+    command: sh -c "npm run build && npx next start -H 127.0.0.1 -p 40200"
