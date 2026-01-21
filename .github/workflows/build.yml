@@ -46,3 +46,16 @@ jobs:
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.image }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # connexion au VPS par SSH et pull de la nouvelle image
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT }}
+          script: |
+            cd /var/www/chat-client
+            docker compose down
+            docker compose up -d
+        
