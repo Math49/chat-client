@@ -56,5 +56,6 @@ jobs:
           script: |
             cd /var/www/chat-client
             docker compose down
+            docker pull ghcr.io/math49/chat-client:latest
             docker compose up -d
         
