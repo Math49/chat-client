@@ -1,15 +1,13 @@
 ﻿/**
  * @fileoverview Contexte profil utilisateur global.
  * 
- * Gère:
- * - Profil utilisateur (pseudo, avatar, phone)
- * - Persistance localStorage
- * - État "ready" pour sync au démarrage
+ * Wrapper React autour du UserService.
+ * Expose la logique métier via le contexte React pour les composants.
  * 
- * Storage:
- * - Clé: "chat-client/user-profile"
- * - Format: JSON {pseudo, avatar, phone}
- * - Auto-sync au démarrage avec hydratation
+ * Gère:
+ * - Hydratation du profil depuis localStorage
+ * - Synchronisation avec UserService
+ * - État "ready" pour l'hydratation client
  * 
  * @module contexts/user-context
  */
@@ -17,54 +15,13 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-
-/**
- * Profil utilisateur courant.
- * @typedef {Object} UserProfile
- * @property {string} pseudo - Pseudonyme (required)
- * @property {string} [avatar] - URL avatar optionnel
- * @property {string} [phone] - Numéro téléphone optionnel
- * @property {string} [clientId] - ID unique persistant pour identifier les reconnexions
- */
-export type UserProfile = {
-  pseudo: string;
-  avatar?: string | null;
-  phone?: string | null;
-  clientId?: string;
-};
-
-// ===== CONSTANTS =====
-
-/** Clé localStorage pour profil utilisateur */
-const STORAGE_KEY = "chat-client/user-profile";
-
-/** Profil par défaut (vide) */
-const defaultProfile: UserProfile = {
-  pseudo: "",
-  avatar: null,
-  phone: null,
-  clientId: undefined,
-};
-
-/**
- * Génère un UUID unique pour identifier le client.
- * Utilisé pour distinguer les reconnexions et nettoyer les anciennes sessions.
- */
-const generateClientId = (): string =>
-  typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+import { userService, type UserProfile } from "@/services";
 
 // ===== CONTEXT TYPE =====
 
 /**
  * Valeur du contexte utilisateur.
- * @typedef {Object} UserContextValue
- * @property {UserProfile|null} profile - Profil courant ou null
- * @property {boolean} isReady - true après hydratation localStorage
- * @property {Function} saveProfile - Sauvegarde complet profil
- * @property {Function} updateProfile - Merge updates partielles
- * @property {Function} clearProfile - Nettoie et logout
+ * Expose l'API du UserService avec état React.
  */
 type UserContextValue = {
   profile: UserProfile | null;
@@ -77,70 +34,16 @@ type UserContextValue = {
 /** Contexte React pour profil utilisateur */
 const UserContext = createContext<UserContextValue | undefined>(undefined);
 
-// ===== STORAGE HELPERS =====
-
-/**
- * Récupère le profil depuis localStorage.
- * Valide le schéma JSON avant retour.
- * Génère un clientId s'il n'existe pas.
- * 
- * @returns {UserProfile|null} Profil parsé ou null si absent/invalide
- */
-const readProfileFromStorage = (): UserProfile | null => {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    
-    // Parse et valide schéma
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed.pseudo === "string") {
-      // Normalise types (pseudo string, avatar/phone nullable)
-      // Génère un clientId si absent (pour anciennes données)
-      return {
-        pseudo: parsed.pseudo,
-        avatar: typeof parsed.avatar === "string" ? parsed.avatar : null,
-        phone: typeof parsed.phone === "string" ? parsed.phone : null,
-        clientId: parsed.clientId ?? generateClientId(),
-      } satisfies UserProfile;
-    }
-  } catch (error) {
-    console.warn("[UserContext] Unable to parse stored profile", error);
-  }
-  return null;
-};
-
-/**
- * Persiste le profil en localStorage.
- * Nettoie si profile === null (logout).
- * 
- * @param {UserProfile|null} profile - Profil à sauvegarder
- */
-const writeProfileToStorage = (profile: UserProfile | null) => {
-  if (typeof window === "undefined") return;
-  try {
-    if (profile) {
-      // Sérialise et persiste
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(profile));
-    } else {
-      // Logout: supprime la clé
-      window.localStorage.removeItem(STORAGE_KEY);
-    }
-  } catch (error) {
-    console.warn("[UserContext] Unable to persist profile", error);
-  }
-};
-
 // ===== PROVIDER =====
 
 /**
  * Provider contexte utilisateur global.
  * 
  * Fait:
- * 1. Récupère profil depuis localStorage au mount
- * 2. Met isReady = true après hydratation
- * 3. Fournit API pour modifier profil
- * 4. Persiste auto-updates en localStorage
+ * 1. Charge le profil depuis UserService au mount
+ * 2. Écoute les changements du service
+ * 3. Met à jour l'état React
+ * 4. Marque isReady après hydratation
  * 
  * À placer dans layout racine (AppShell).
  * 
@@ -149,80 +52,63 @@ const writeProfileToStorage = (profile: UserProfile | null) => {
  * @returns {JSX.Element} Provider contexte
  */
 export function UserProvider({ children }: { children: React.ReactNode }) {
-  // État profil et readiness
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [isReady, setIsReady] = useState(false);
 
-  // Hydrate depuis localStorage au mount
+  // Initialise depuis UserService au mount
   useEffect(() => {
-    const stored = readProfileFromStorage();
-    if (stored) {
-      setProfile(stored);
-    }
-    // Marque ready même si pas de profil (user non connecté)
+    const stored = userService.loadProfile();
+    setProfile(stored);
+
+    // S'abonne aux changements du service
+    const unsubscribe = userService.onProfileChanged((newProfile) => {
+      setProfile(newProfile);
+    });
+
     setIsReady(true);
+
+    return unsubscribe;
   }, []);
 
   /**
-   * Sauvegarde un nouveau profil complet.
-   * Normalise pseudo (trim), nullify optional fields.
-   * Persiste et marque ready.
-   * 
-   * @param {UserProfile} next - Profil complet
+   * Sauvegarde un profil complet via le service.
    */
   const saveProfile = useCallback((next: UserProfile) => {
     const normalized: UserProfile = {
       pseudo: next.pseudo.trim(),
       avatar: next.avatar ?? null,
       phone: next.phone ?? null,
-      clientId: next.clientId ?? generateClientId(),
+      clientId: next.clientId,
     };
-    setProfile(normalized);
-    writeProfileToStorage(normalized);
-    setIsReady(true);
+    userService.saveProfile(normalized);
   }, []);
 
   /**
-   * Met à jour le profil avec des champs partiels.
-   * Merge avec profil courant, rejette si pseudo vide.
-   * Préserve le clientId existant.
-   * 
-   * @param {Partial<UserProfile>} value - Champs à updater
+   * Met à jour le profil partiellement via le service.
    */
   const updateProfile = useCallback((value: Partial<UserProfile>) => {
-    setProfile((prev) => {
-      // Base: profil courant ou défaut
-      const base = prev ?? defaultProfile;
-      
-      // Merge: applique updates sur base
-      const merged: UserProfile = {
-        pseudo: (value.pseudo ?? base.pseudo).trim(),
-        avatar: value.avatar === undefined ? base.avatar ?? null : value.avatar,
-        phone: value.phone === undefined ? base.phone ?? null : value.phone,
-        clientId: value.clientId ?? base.clientId ?? generateClientId(),
-      };
-      
-      // Validation: pseudo obligatoire
-      if (!merged.pseudo) {
-        return prev; // Reject: pas de changement
-      }
-      
-      // Persiste et marque ready
-      writeProfileToStorage(merged);
-      setIsReady(true);
-      return merged;
-    });
+    const current = userService.loadProfile();
+    if (!current) return;
+
+    const merged: UserProfile = {
+      pseudo: (value.pseudo ?? current.pseudo).trim(),
+      avatar: value.avatar === undefined ? current.avatar : value.avatar,
+      phone: value.phone === undefined ? current.phone : value.phone,
+      clientId: value.clientId ?? current.clientId,
+    };
+
+    if (!merged.pseudo) return; // Rejette si pseudo vide
+
+    userService.saveProfile(merged);
   }, []);
 
   /**
-   * Supprime le profil (logout).
+   * Supprime le profil (logout) via le service.
    */
   const clearProfile = useCallback(() => {
-    setProfile(null);
-    writeProfileToStorage(null);
+    userService.clearProfile();
   }, []);
 
-  // Mémoïse contexte pour éviter re-render enfants inutiles
   const value = useMemo(
     () => ({ profile, isReady, saveProfile, updateProfile, clearProfile }),
     [profile, isReady, saveProfile, updateProfile, clearProfile]
@@ -251,3 +137,9 @@ export const useUser = () => {
   }
   return context;
 };
+
+// ===== EXPORTS =====
+
+// Réexport du type depuis le service pour compatibilité
+export type { UserProfile };
+

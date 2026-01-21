@@ -80,10 +80,26 @@ const resolveVibrationPattern = (value?: number | number[] | false): number[] | 
  * });
  */
 /**
- * Affiche une notification Web avec vibration optionnelle.
- * Gère automatiquement les permissions et la vibration du navigateur.
+ * Affiche une notification Web avec vibration appropriée.
+ * 
+ * Gère automatiquement:
+ * - Demande de permission si nécessaire
+ * - Vibration du device lors de la notification
+ * - Pattern de vibration personnalisable ou par défaut
+ * - Ouverture URL au clic sur la notification
+ * 
+ * Pattern vibration par défaut: [160ms vibration, 80ms pause, 160ms vibration]
+ * 
  * @param {NotifyOptions} options - Configuration notification
- * @returns {Promise<boolean>} True si notification affichée
+ * @returns {Promise<boolean>} True si notification affichée avec succès
+ * 
+ * @example
+ * await showNotification({
+ *   title: "Message",
+ *   body: "Nouveau message reçu",
+ *   vibrate: [200, 100, 200], // Vibration personnalisée
+ *   url: "/room/general"
+ * });
  */
 export const showNotification = async ({
   title = "Notification",
@@ -107,7 +123,6 @@ export const showNotification = async ({
 
   // Résoudre le pattern de vibration
   const pattern = resolveVibrationPattern(vibrate);
-
 
   // Activer vibration si supportée
   if (pattern && typeof navigator.vibrate === "function") {
